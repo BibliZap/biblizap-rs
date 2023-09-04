@@ -1,5 +1,5 @@
 [package]
-name = "biblizap"
+name = "biblizap-rs"
 version = "0.1.0"
 edition = "2021"
 
