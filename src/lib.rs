@@ -108,14 +108,36 @@ impl Article {
     }
 }
 
+fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
+    let src_pmid_comma =  src_pmid.join(",");
+    let asc_url: String = format!("{ASC_URL_BASE}{src_pmid_comma}");
+    let desc_url: String = format!("{DESC_URL_BASE}{src_pmid_comma}");
 
+    let body_asc: String = reqwest::blocking::get(asc_url).unwrap().text().unwrap();
+    let body_desc: String = reqwest::blocking::get(desc_url).unwrap().text().unwrap();
+
+    let body: String = [body_desc, body_asc].join("\n");
+
+    let id_regex = Regex::new("(?s)<Id>(.*?)</Id>").unwrap();
+
+    let dest_pmids : Result<Vec<_>> = id_regex.captures_iter(&body).
+        map(|x| anyhow::Ok(x.
+            get(1).
+            context("Couldn't get ID")?.
+            as_str().
+            to_owned())).
+        skip(src_pmid.len()). // Skip n first as pubmed returns input as output before giving citations
+        collect();
+
+    dest_pmids
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn aproto() {
+    fn test_snowball_onestep_unsafe() {
         let src_pmid = [
             "30507730", "27385549", "32162500", "33312483", "34067730", "12183207", "12540391",
             "12569225", "1509229", "15380917", "16616614", "17452684", "17603144", "18053143",
@@ -133,15 +155,9 @@ mod tests {
             "7961281",
         ];
 
-        let url: String = format!(
-            "{ASC_URL_BASE}{}",
-            src_pmid.join(",")
-        );
+        let new_pmid = snowball_onestep_unsafe(&src_pmid).unwrap();
 
-        println!("{url}");
-
-        let body = reqwest::blocking::get(url).unwrap().text().unwrap();
-
+        assert_eq!(new_pmid.len(), 17175);
     }
 
     #[test]
