@@ -18,32 +18,30 @@ macro_rules! pattern {
 static PMID_PATTERN: &str = pattern!("PMID");
 static TITLE_PATTERN: &str = pattern!("TI");
 static ABSTRACT_PATTERN: &str = pattern!("AB");
+static AUTHOR_PATTERN: &str = pattern!("AU");
+
+static ASC_URL_BASE: &str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&linkname=pubmed_pubmed_citedin&id=";
+static DESC_URL_BASE: &str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&linkname=pubmed_pubmed_refs&id=";
 
 lazy_static::lazy_static! {
-    static ref PMID_REGEX: Regex = Regex::new(PMID_PATTERN).unwrap();
-    static ref TITLE_REGEX: Regex = Regex::new(TITLE_PATTERN).unwrap();
-    static ref ABSTRACT_REGEX: Regex = Regex::new(ABSTRACT_PATTERN).unwrap();
+    static ref PMID_REGEX: Regex = Regex::new(PMID_PATTERN).expect("PMID_REGEX failed to compile");
+    static ref TITLE_REGEX: Regex = Regex::new(TITLE_PATTERN).expect("TITLE_REGEX failed to compile");
+    static ref ABSTRACT_REGEX: Regex = Regex::new(ABSTRACT_PATTERN).expect("ABSTRACT_REGEX failed to compile");
+    static ref AUTHOR_REGEX: Regex = Regex::new(AUTHOR_PATTERN).expect("AUTHOR_REGEX failed to compile");
 }
 
 
-#[derive(Debug, Clone)]
-struct Article {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Article {
     pmid: String,
     title: Option<String>,
     summary: Option<String>,
+    authors: Option<Vec<String>>
 }
 
 impl Article {
-    fn from_raw_article(raw_article: &str) -> Result<Article> {
-        fn extract_pattern<'a>(article: &'a str, regex: &Regex, group: usize) -> Option<&'a str> {
-            fn str_from_capture(capture: Option<regex::Captures<'_>>, group: usize) -> Option<&str> {
-                Some(capture?.get(group)?.as_str())
-            }
-            let capture = regex.captures(article);
-            str_from_capture(capture, group)
-        }
-        
-        fn clean_feature(input: Option<&str>) -> Option<String> {
+    pub fn from_raw_article(raw_article: &str) -> Result<Article> {
+        fn clean_feature(input: &str) -> String {
             pub fn trim_whitespace(s: &str) -> String {
                 let mut new_str = s.trim().to_owned();
                 let mut prev = ' '; // The initial value doesn't really matter
@@ -55,51 +53,58 @@ impl Article {
                 new_str
             }
         
-            let ret = input?.replace("\r\n", "");
+            let ret = input.replace("\r\n", "");
         
-            Some(trim_whitespace(&ret))
+            trim_whitespace(&ret)
+        }
+
+        fn extract_single(article: &str, regex: &Regex, group: usize) -> Option<String> {
+            let string = regex.captures(article)?.get(group)?.as_str();
+            Some(clean_feature(string))
+        }
+
+        fn extract_all(article: &str, regex: &Regex, group: usize) -> Option<Vec<String>> {
+            let vec: Option<Vec<String>> = regex.captures_iter(article).map(|x| Some(clean_feature(x.get(group)?.as_str()))).collect();
+            vec
         }
 
         Ok(Article {
-            pmid: clean_feature(extract_pattern(raw_article, &PMID_REGEX, 1))
+            pmid: extract_single(raw_article, &PMID_REGEX, 1)
                 .with_context(|| format!("No PMID found for this article : \n{raw_article}"))?,
-            title: clean_feature(extract_pattern(raw_article, &TITLE_REGEX, 1)),
-            summary: clean_feature(extract_pattern(raw_article, &ABSTRACT_REGEX, 1)),
+            title: extract_single(raw_article, &TITLE_REGEX, 1),
+            summary: extract_single(raw_article, &ABSTRACT_REGEX, 1),
+            authors: extract_all(raw_article, &AUTHOR_REGEX, 1)
         })
     }
 
-    pub fn from_raw_articles<'buf>(raw_articles: &'buf str) -> Result<impl Iterator<Item = Article> + 'buf> { 
+    pub fn from_raw_articles(raw_articles: &str) -> Result<impl Iterator<Item = Article> + '_> { 
         Ok(raw_articles
             .split("\r\n\r\n")
             .map(|x| Article::from_raw_article(x).unwrap()))
     }
 
 
-    fn request_raw_articles(src_pmid: &[&str]) -> String {
-        let url = format!(
+    fn request_raw_articles(src_pmid: &[&str]) -> Result<String> {
+        let url: String = format!(
             "https://pubmed.ncbi.nlm.nih.gov/?term={}&show_snippets=off&format=pubmed&size=200",
             src_pmid.join(",")
         );
 
-        let body = reqwest::blocking::get(url)
-            .expect("Pubmed request failed")
-            .text()
-            .expect("Couldn't convert request result to text");
+        let body = reqwest::blocking::get(url)?.text()?;
 
         let body_to_raw_articles: Regex = Regex::new(r"(?s)<pre.*?(PMID.*)</pre>").unwrap();
 
-        body_to_raw_articles
-            .captures(&body)
-            .unwrap()
-            .get(1)
-            .unwrap()
+        Ok(body_to_raw_articles
+            .captures(&body).context("Capture failed")?
+            .get(1).context("Get group 1 failed")?
             .as_str()
-            .to_owned()
+            .to_owned())
     }
 
-    fn request_articles(src_pmid: &[&str]) -> Vec<Article> {
-        let raw_articles = Article::request_raw_articles(src_pmid);
-        Article::from_raw_articles(&raw_articles).expect("a").collect()
+    pub fn request_articles(src_pmid: &[&str]) -> Result<Vec<Article>> {
+        let raw_articles = Article::request_raw_articles(src_pmid)?;
+        let ret = Ok(Article::from_raw_articles(&raw_articles)?.collect());
+        ret
     }
 }
 
@@ -110,20 +115,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        println!("{ABSTRACT_PATTERN:?}");
-        assert_eq!(result, 4);
-    }
-
-    #[test]
-    fn regex_pattern_construction() {
-        assert_eq!(ABSTRACT_PATTERN, "(?s)AB[[:space:]]*-[[:space:]]*(.*?)[A-Z]+[[:space:]]*-");
-    }
-
-    #[test]
-    fn request_articles() {
-        let src_pmid = vec![
+    fn aproto() {
+        let src_pmid = [
             "30507730", "27385549", "32162500", "33312483", "34067730", "12183207", "12540391",
             "12569225", "1509229", "15380917", "16616614", "17452684", "17603144", "18053143",
             "19002201", "19127177", "19197213", "19286913", "19565683", "19910802", "21694556",
@@ -140,28 +133,61 @@ mod tests {
             "7961281",
         ];
 
-        let raw_articles_str = Article::request_raw_articles(&src_pmid);
-        //println!("{raw_articles_str}");
+        let url: String = format!(
+            "{ASC_URL_BASE}{}",
+            src_pmid.join(",")
+        );
 
-        
+        println!("{url}");
 
-        let raw_articles: Vec<&str> = raw_articles_str
-            .split("\r\n\r\n").collect();
+        let body = reqwest::blocking::get(url).unwrap().text().unwrap();
 
-        let first_raw_article = raw_articles.get(0).unwrap();
+    }
 
-        let author_regex = Regex::new("(?s)AU[[:space:]]*-[[:space:]]*(.*?)[A-Z]+[[:space:]]*-").unwrap();
-        let capture_iter = author_regex.captures_iter(first_raw_article);
+    #[test]
+    fn regex_pattern_construction() {
+        assert_eq!(ABSTRACT_PATTERN, "(?s)AB[[:space:]]*-[[:space:]]*(.*?)[A-Z]+[[:space:]]*-");
+    }
 
-        for au_field in capture_iter {
-            let a = au_field.get(1);
-        }
+    #[test]
+    fn request_multiple_articles() {
+        let src_pmid = [
+            "30507730", "27385549", "32162500", "33312483", "34067730", "12183207", "12540391",
+            "12569225", "1509229", "15380917", "16616614", "17452684", "17603144", "18053143",
+            "19002201", "19127177", "19197213", "19286913", "19565683", "19910802", "21694556",
+            "21773020", "22011559", "22303996", "2278545", "23012634", "23038786", "23299872",
+            "24113704", "24949644", "25141359", "25991989", "26205763", "26221161", "26349502",
+            "26842868", "26896559", "27030897", "27080110", "27243798", "27350847", "27421291",
+            "27475271", "27901037", "28422589", "28448210", "28548972", "28593089", "28596798",
+            "28783444", "28813586", "28870141", "28955193", "29084230", "29097009", "29113569",
+            "29189580", "29373506", "29629183", "29879146", "30139418", "30193830", "30224304",
+            "30290832", "30659818", "30899545", "31352255", "31524089", "31530900", "31663312",
+            "31694665", "31775952", "31814877", "31817936", "31837386", "31837838", "31855914",
+            "31987537", "31991706", "32442789", "32472025", "32487981", "32629826", "33334688",
+            "33872735", "34065984", "34628279", "34886363", "34997040", "35509534", "7124671",
+            "7961281",
+        ];
 
-
-        println!("{}", first_raw_article);
-
-        let articles = Article::request_articles(&src_pmid);
+        let articles = Article::request_articles(&src_pmid).expect("Article request failed");
 
         assert_eq!(articles.len(), 92);
+    }
+    
+    #[test]
+    fn request_single_article() {
+        let src_pmid: [&str; 1] = ["30507730"];
+        let articles = Article::request_articles(&src_pmid).expect("Article request failed");
+        
+        assert_eq!(articles.len(), 1);
+
+        let article = articles.get(0).expect("One article must be returned");
+        
+        let expected_article = Article {
+            pmid: "30507730".to_owned(),
+            title: Some("Pole Dancing for Fitness: The Physiological and Metabolic Demand of a 60-Minute Class.".to_owned()),
+            summary: Some("Nicholas, JC, McDonald, KA, Peeling, P, Jackson, B, Dimmock, JA, Alderson, JA, and Donnelly, CJ. Pole dancing for fitness: The physiological and metabolic demand of a 60-minute class. J Strength Cond Res 33(10): 2704-2710, 2019-Little is understood about the acute physiological or metabolic demand of pole dancing classes. As such, the aims of this study were to quantify the demands of a standardized recreational pole dancing class, classifying outcomes according to American College of Sports Medicine (ACSM) exercise-intensity guidelines, and to explore differences in physiological and metabolic measures between skill- and routine-based class components. Fourteen advanced-level amateur female pole dancers completed three 60-minute standardized pole dancing classes. In one class, participants were fitted with a portable metabolic analysis unit. Overall, classes were performed at a mean VO2 of 16.0 ml·kg·min, total energy cost (EC) of 281.6 kcal (4.7 kcal·min), metabolic equivalent (METs) of 4.6, heart rate of 131 b·min, rate of perceived exertion (RPE) of 6.3/10, and blood lactate of 3.1 mM. When comparing skill- and routine-based components of the class, EC per minute (4.4 vs. 5.3 kcal·min), peak VO2 (21.5 vs. 29.6 ml·kg·min), METs (4.3 vs. 5.2), and RPE (7.2 vs. 8.4) were all greater in the routine-based component (p &lt; 0.01), indicating that classes with an increased focus on routine-based training, as compared to skill-based training, may benefit those seeking to exercise at a higher intensity level, resulting in greater caloric expenditure. In accordance with ASCM guidelines, an advanced-level 60-minute pole dancing class can be classified as a moderate-intensity cardiorespiratory exercise; when completed for ≥30 minutes, ≥5 days per week (total ≥150 minutes) satisfies the recommended level of exercise for improved health and cardiorespiratory fitness.".to_owned()),
+            authors: Some(vec!["Nicholas, Joanna C".to_owned(), "McDonald, Kirsty A".to_owned(), "Peeling, Peter".to_owned(), "Jackson, Ben".to_owned(), "Dimmock, James A".to_owned(), "Alderson, Jacqueline A".to_owned(), "Donnelly, Cyril J".to_owned()])
+        };
+        assert_eq!(*article, expected_article);
     }
 }
