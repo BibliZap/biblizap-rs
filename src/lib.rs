@@ -1,9 +1,5 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
-
 use regex::Regex;
-use anyhow::{Context, Result, Error};
+use anyhow::{Context, Result};
 
 macro_rules! pattern {
     ($feature_identifer:expr) => {{
@@ -102,7 +98,7 @@ impl Article {
             .to_owned())
     }
 
-    pub async fn request_articles(src_pmid: &[&str]) -> Result<Vec<Article>> {
+    pub async fn complete_articles(src_pmid: &[&str]) -> Result<Vec<Article>> {
         let raw_articles = Article::request_raw_articles(src_pmid).await?;
         let ret = Ok(Article::from_raw_articles(&raw_articles)?.collect());
         ret
@@ -133,31 +129,41 @@ async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
 
 async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
     let dest_pmid = futures::future::join_all(src_pmid
-        .chunks(325)
-        .map(|x| snowball_onestep_unsafe(x) ))
-    .await
-    .into_iter()
-    .collect::<Result<Vec<_>>>()?
-    .into_iter()
-    .flatten()
-    .collect::<Vec<String>>();
+            .chunks(325)
+            .map(|x| snowball_onestep_unsafe(x) ))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<String>>();
 
     Ok(dest_pmid)
 }
 
-async fn snowball(src_pmid: &[&str], max_depth: u8) -> Result<Vec<String>> {
-    let current_pmid = src_pmid.iter()
+pub async fn snowball(src_pmid: &[&str], max_depth: u8) -> Result<Vec<String>> {
+    let mut all_pmid : Vec<String> = Vec::new();
+    
+    let mut current_pmid = src_pmid
+        .iter()
         .map(|x| *x)
-        .collect::<Vec<&str>>();
-    let mut new_pmid : Vec<String>;
-    for _ in [0..max_depth] {
-        new_pmid = snowball_onestep(&current_pmid).await?;
+        .map(|x| x.to_owned())
+        .collect::<Vec<String>>();
 
-        //current_pmid = new_pmid;
+    all_pmid.append(&mut current_pmid.clone());
+
+    for _ in 0..max_depth {
+        let current_pmid_refs = current_pmid
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<Vec<&str>>();
         
+        current_pmid = snowball_onestep(&current_pmid_refs).await?;
+
+        all_pmid.append(&mut current_pmid.clone());
     }
 
-    Ok(new_pmid)
+    Ok(all_pmid)
 }
 
 #[cfg(test)]
@@ -165,27 +171,70 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn test_snowball_multiple() {
+        let src_pmid = ["30507730"];
+
+        let dest_pmid = snowball(&src_pmid, 2).await.unwrap();
+
+        let expected_dest_pmid = 
+            ["30507730", "30507730", "36311211", "35509534", "34997040",
+            "34886363", "34067730", "34628279", "34125618", "34065984",
+            "33872735", "33334688", "33312483", "33021583", "32955837",
+            "32629826", "32487981", "32472025", "32442789", "32338038",
+            "32162500", "31991706", "31987537", "31855914", "31837838",
+            "31837386", "31817936", "31814877", "31775952", "31694665",
+            "31663312", "31530900", "31524089", "31352255", "30899545",
+            "30659818", "30507730", "30290832", "30224304", "30193830",
+            "30139418", "29879146", "29629183", "29373506", "29189580",
+            "29113569", "29097009", "29084230", "28955193", "28870141",
+            "28813586", "28783444", "28596798", "28593089", "28548972",
+            "28448210", "28422589", "27901037", "27475271", "27421291",
+            "27385549", "27350847", "27243798", "27080110", "27030897",
+            "26896559", "26842868", "26349502", "26221161", "26205763",
+            "25991989", "25141359", "24949644", "24113704", "23299872",
+            "23038786", "23012634", "22303996", "22011559", "21773020",
+            "21694556", "19910802", "19565683", "19286913", "19197213",
+            "19127177", "19002201", "18053143", "17603144", "17452684",
+            "16616614", "15380917", "12569225", "12540391", "12183207",
+            "7961281", "7124671", "2278545", "1509229", "30507730",
+            "36311211", "35509534", "34997040", "34886363", "34067730",
+            "36553386", "36311211", "35509534", "34997040", "34886363",
+            "34067730"];
+
+        assert_eq!(dest_pmid, expected_dest_pmid);
+    }
+
+    #[tokio::test]
     async fn test_snowball_onestep() {
-        let src_pmid = [
-            "30507730", "27385549", "32162500", "33312483", "34067730", "12183207", "12540391",
-            "12569225", "1509229", "15380917", "16616614", "17452684", "17603144", "18053143",
-            "19002201", "19127177", "19197213", "19286913", "19565683", "19910802", "21694556",
-            "21773020", "22011559", "22303996", "2278545", "23012634", "23038786", "23299872",
-            "24113704", "24949644", "25141359", "25991989", "26205763", "26221161", "26349502",
-            "26842868", "26896559", "27030897", "27080110", "27243798", "27350847", "27421291",
-            "27475271", "27901037", "28422589", "28448210", "28548972", "28593089", "28596798",
-            "28783444", "28813586", "28870141", "28955193", "29084230", "29097009", "29113569",
-            "29189580", "29373506", "29629183", "29879146", "30139418", "30193830", "30224304",
-            "30290832", "30659818", "30899545", "31352255", "31524089", "31530900", "31663312",
-            "31694665", "31775952", "31814877", "31817936", "31837386", "31837838", "31855914",
-            "31987537", "31991706", "32442789", "32472025", "32487981", "32629826", "33334688",
-            "33872735", "34065984", "34628279", "34886363", "34997040", "35509534", "7124671",
-            "7961281",
-        ];
+        let src_pmid = ["30507730", "36311211", "35509534", "34997040", "34886363", "34067730"];
 
-        let new_pmid = snowball_onestep(&src_pmid).await.unwrap();
+        let dest_pmid = snowball_onestep(&src_pmid).await.unwrap();
+        let expected_dest_pmid = 
+            ["30507730", "30507730", "36311211", "35509534", "34997040",
+            "34886363", "34067730", "34628279", "34125618", "34065984",
+            "33872735", "33334688", "33312483", "33021583", "32955837",
+            "32629826", "32487981", "32472025", "32442789", "32338038",
+            "32162500", "31991706", "31987537", "31855914", "31837838",
+            "31837386", "31817936", "31814877", "31775952", "31694665",
+            "31663312", "31530900", "31524089", "31352255", "30899545",
+            "30659818", "30507730", "30290832", "30224304", "30193830",
+            "30139418", "29879146", "29629183", "29373506", "29189580",
+            "29113569", "29097009", "29084230", "28955193", "28870141",
+            "28813586", "28783444", "28596798", "28593089", "28548972",
+            "28448210", "28422589", "27901037", "27475271", "27421291",
+            "27385549", "27350847", "27243798", "27080110", "27030897",
+            "26896559", "26842868", "26349502", "26221161", "26205763",
+            "25991989", "25141359", "24949644", "24113704", "23299872",
+            "23038786", "23012634", "22303996", "22011559", "21773020",
+            "21694556", "19910802", "19565683", "19286913", "19197213",
+            "19127177", "19002201", "18053143", "17603144", "17452684",
+            "16616614", "15380917", "12569225", "12540391", "12183207",
+            "7961281", "7124671", "2278545", "1509229", "30507730",
+            "36311211", "35509534", "34997040", "34886363", "34067730",
+            "36553386", "36311211", "35509534", "34997040", "34886363",
+            "34067730"];
 
-        assert_eq!(new_pmid.len(), 17175);
+        assert_eq!(dest_pmid, expected_dest_pmid);
     }
 
     #[test]
@@ -212,7 +261,7 @@ mod tests {
             "7961281",
         ];
 
-        let articles = Article::request_articles(&src_pmid)
+        let articles = Article::complete_articles(&src_pmid)
             .await
             .expect("Article request failed");
 
@@ -224,11 +273,15 @@ mod tests {
         
         let src_pmid: [&str; 1] = ["30507730"];
 
-        let articles = Article::request_articles(&src_pmid).await.expect("Article request failed");
+        let articles = Article::complete_articles(&src_pmid)
+            .await
+            .expect("Article request failed");
         
         assert_eq!(articles.len(), 1);
 
-        let article = articles.get(0).expect("One article must be returned");
+        let article = articles
+            .get(0)
+            .expect("One article must be returned");
         
         let expected_article = Article {
             pmid: "30507730".to_owned(),
