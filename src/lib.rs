@@ -3,7 +3,7 @@ pub fn add(left: usize, right: usize) -> usize {
 }
 
 use regex::Regex;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, Error};
 
 macro_rules! pattern {
     ($feature_identifer:expr) => {{
@@ -28,6 +28,7 @@ lazy_static::lazy_static! {
     static ref TITLE_REGEX: Regex = Regex::new(TITLE_PATTERN).expect("TITLE_REGEX failed to compile");
     static ref ABSTRACT_REGEX: Regex = Regex::new(ABSTRACT_PATTERN).expect("ABSTRACT_REGEX failed to compile");
     static ref AUTHOR_REGEX: Regex = Regex::new(AUTHOR_PATTERN).expect("AUTHOR_REGEX failed to compile");
+    static ref ID_REGEX: Regex = Regex::new("(?s)<Id>(.*?)</Id>").expect("AUTHOR_REGEX failed to compile");
 }
 
 
@@ -84,15 +85,15 @@ impl Article {
     }
 
 
-    fn request_raw_articles(src_pmid: &[&str]) -> Result<String> {
+    async fn request_raw_articles(src_pmid: &[&str]) -> Result<String> {
         let url: String = format!(
             "https://pubmed.ncbi.nlm.nih.gov/?term={}&show_snippets=off&format=pubmed&size=200",
             src_pmid.join(",")
         );
 
-        let body = reqwest::blocking::get(url)?.text()?;
+        let body = reqwest::get(url).await?.text().await?;
 
-        let body_to_raw_articles: Regex = Regex::new(r"(?s)<pre.*?(PMID.*)</pre>").unwrap();
+        let body_to_raw_articles: Regex = Regex::new(r"(?s)<pre.*?(PMID.*)</pre>")?;
 
         Ok(body_to_raw_articles
             .captures(&body).context("Capture failed")?
@@ -101,43 +102,70 @@ impl Article {
             .to_owned())
     }
 
-    pub fn request_articles(src_pmid: &[&str]) -> Result<Vec<Article>> {
-        let raw_articles = Article::request_raw_articles(src_pmid)?;
+    pub async fn request_articles(src_pmid: &[&str]) -> Result<Vec<Article>> {
+        let raw_articles = Article::request_raw_articles(src_pmid).await?;
         let ret = Ok(Article::from_raw_articles(&raw_articles)?.collect());
         ret
     }
 }
 
-fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
+async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
     let src_pmid_comma =  src_pmid.join(",");
     let asc_url: String = format!("{ASC_URL_BASE}{src_pmid_comma}");
     let desc_url: String = format!("{DESC_URL_BASE}{src_pmid_comma}");
 
-    let body_asc: String = reqwest::blocking::get(asc_url).unwrap().text().unwrap();
-    let body_desc: String = reqwest::blocking::get(desc_url).unwrap().text().unwrap();
+    let body_asc: String = reqwest::get(asc_url).await?.text().await?;
+    let body_desc: String = reqwest::get(desc_url).await?.text().await?;
 
     let body: String = [body_desc, body_asc].join("\n");
 
-    let id_regex = Regex::new("(?s)<Id>(.*?)</Id>").unwrap();
+    let dest_pmid : Result<Vec<_>> = ID_REGEX.captures_iter(&body)
+        .map(|x| anyhow::Ok(x
+            .get(1)
+            .context("Couldn't get ID")?
+            .as_str()
+            .to_owned()))
+        .skip(src_pmid.len()) // Skip n first as pubmed returns input as output before giving citations
+        .collect();
 
-    let dest_pmids : Result<Vec<_>> = id_regex.captures_iter(&body).
-        map(|x| anyhow::Ok(x.
-            get(1).
-            context("Couldn't get ID")?.
-            as_str().
-            to_owned())).
-        skip(src_pmid.len()). // Skip n first as pubmed returns input as output before giving citations
-        collect();
+    dest_pmid
+}
 
-    dest_pmids
+async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
+    let dest_pmid = futures::future::join_all(src_pmid
+        .chunks(325)
+        .map(|x| snowball_onestep_unsafe(x) ))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>();
+
+    Ok(dest_pmid)
+}
+
+async fn snowball(src_pmid: &[&str], max_depth: u8) -> Result<Vec<String>> {
+    let current_pmid = src_pmid.iter()
+        .map(|x| *x)
+        .collect::<Vec<&str>>();
+    let mut new_pmid : Vec<String>;
+    for _ in [0..max_depth] {
+        new_pmid = snowball_onestep(&current_pmid).await?;
+
+        //current_pmid = new_pmid;
+        
+    }
+
+    Ok(new_pmid)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_snowball_onestep_unsafe() {
+    #[tokio::test]
+    async fn test_snowball_onestep() {
         let src_pmid = [
             "30507730", "27385549", "32162500", "33312483", "34067730", "12183207", "12540391",
             "12569225", "1509229", "15380917", "16616614", "17452684", "17603144", "18053143",
@@ -155,7 +183,7 @@ mod tests {
             "7961281",
         ];
 
-        let new_pmid = snowball_onestep_unsafe(&src_pmid).unwrap();
+        let new_pmid = snowball_onestep(&src_pmid).await.unwrap();
 
         assert_eq!(new_pmid.len(), 17175);
     }
@@ -165,8 +193,8 @@ mod tests {
         assert_eq!(ABSTRACT_PATTERN, "(?s)AB[[:space:]]*-[[:space:]]*(.*?)[A-Z]+[[:space:]]*-");
     }
 
-    #[test]
-    fn request_multiple_articles() {
+    #[tokio::test]
+    async fn request_multiple_articles() {
         let src_pmid = [
             "30507730", "27385549", "32162500", "33312483", "34067730", "12183207", "12540391",
             "12569225", "1509229", "15380917", "16616614", "17452684", "17603144", "18053143",
@@ -184,15 +212,19 @@ mod tests {
             "7961281",
         ];
 
-        let articles = Article::request_articles(&src_pmid).expect("Article request failed");
+        let articles = Article::request_articles(&src_pmid)
+            .await
+            .expect("Article request failed");
 
         assert_eq!(articles.len(), 92);
     }
     
-    #[test]
-    fn request_single_article() {
+    #[tokio::test]
+    async fn request_single_article() {
+        
         let src_pmid: [&str; 1] = ["30507730"];
-        let articles = Article::request_articles(&src_pmid).expect("Article request failed");
+
+        let articles = Article::request_articles(&src_pmid).await.expect("Article request failed");
         
         assert_eq!(articles.len(), 1);
 
