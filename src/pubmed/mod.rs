@@ -127,7 +127,7 @@ async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
     dest_pmid
 }
 
-async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
+pub async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
     let dest_pmid = futures::future::join_all(src_pmid
             .chunks(325)
             .map(|x| snowball_onestep_unsafe(x) ))

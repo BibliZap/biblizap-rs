@@ -1,5 +1,5 @@
-mod lens;
-mod pubmed;
+pub mod lens;
+pub mod pubmed;
 use anyhow::{Context, Result};
 
 async fn request(client: &reqwest::Client, api_key: &str, body: &str) -> Result<reqwest::Response> {
@@ -60,7 +60,6 @@ mod tests {
         let client = reqwest::Client::new();
         let response = request(&client, api_key, &body)
                 .await.unwrap();
-        
         
         let text = response
             .text()
