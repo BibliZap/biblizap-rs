@@ -7,7 +7,6 @@ mod tests {
 
     #[tokio::test]
     async fn proto() {
-        use serde_json::Value;
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
         let src_lensid = ["020-200-401-307-33X", "050-708-976-791-252"];
 

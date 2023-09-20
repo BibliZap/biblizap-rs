@@ -157,8 +157,12 @@ pub async fn request_articles(id_list: &[&str], include:&[&str], api_key: &str, 
         body
     }
 
+    let client = match client {
+        Some(t) => t,
+        None => reqwest::Client::new()
+    };
+    
     let body = body(&id_list, &include);
-    let client = reqwest::Client::new();
     let response = request_response(&client, api_key, &body)
             .await?;
 
@@ -166,7 +170,7 @@ pub async fn request_articles(id_list: &[&str], include:&[&str], api_key: &str, 
         .text()
         .await?;
     
-    let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
 
     let ret: Vec<Article> = serde_json::from_value::<Vec<Article>>(json_value["data"].clone())?;
 
