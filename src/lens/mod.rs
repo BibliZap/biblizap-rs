@@ -1,3 +1,4 @@
+use reqwest::header::ToStrError;
 use serde::{Deserialize, Deserializer};
 use serde::de::{self, Visitor, SeqAccess};
 use serde_json::Map;
@@ -9,8 +10,12 @@ pub struct Article {
     pub title: Option<String>,
     #[serde(rename = "abstract")] 
     pub summary: Option<String>,
+    pub scholarly_citations_count: Option<i32>,
 
-    pub external_ids: ExternalIds,
+    pub external_ids: Option<ExternalIds>,
+    pub authors: Vec<Author>,
+    pub source: Option<Source>,
+    pub year_published: Option<i32>
 }
 
 #[derive(Debug, Default)]
@@ -20,6 +25,21 @@ pub struct ExternalIds {
     pub coreid: Vec<String>,
     pub pmcid: Vec<String>,
     pub magid: Vec<String>
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Author {
+    pub first_name: Option<String>,
+    pub initials: Option<String>,
+    pub last_name: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Source {
+    pub publisher: Option<String>,
+    pub title: Option<String>,
+    #[serde(rename = "type")] 
+    pub kind: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for ExternalIds {
@@ -77,4 +97,78 @@ impl<'de> ExternalIdsVisitor {
             .ok_or_else(|| de::Error::custom("failed to get value string"))?
             .to_owned())
     }
+}
+
+use thiserror::Error;
+#[derive(Error, Debug)]
+pub enum LensError {
+    #[error("request error")]
+    Request(#[from] reqwest::Error),
+    #[error("parse int error")]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error("rate limit missing")]
+    RateLimitMissing,
+    #[error("request to str error")]
+    RequestToStr(#[from] ToStrError),
+    #[error("serde_json error")]
+    SerdeJson(#[from] serde_json::Error),
+}
+
+pub async fn request_response(client: &reqwest::Client, api_key: &str, body: &str) -> Result<reqwest::Response, LensError> {
+    let base_url: &str = "https://api.lens.org/scholarly/search";
+
+    loop {
+        let response = client
+            .post(base_url)
+            .header("Authorization", api_key)
+            .header("Content-Type", "application/json")
+            .body(body.to_owned())
+            .send()
+            .await?;
+
+        if response.status() == 200 {
+            return Ok(response);
+        } else {
+            println!("{:?}", response.headers());
+            let seconds_to_wait = response.headers()
+                .get("x-rate-limit-retry-after-seconds")
+                .ok_or(LensError::RateLimitMissing)?
+                .to_str()?
+                .parse::<u64>()?;
+            
+            async_std::task::sleep(std::time::Duration::from_secs(seconds_to_wait)).await;
+        }
+    }
+}
+
+pub async fn request_articles(id_list: &[&str], include:&[&str], api_key: &str, client: Option<reqwest::Client>) -> Result<Vec<Article>, LensError>{
+    fn body(id_list: &[&str], include: &[&str]) -> String {
+        let body = serde_json::json!(
+        {
+            "query": {
+                "terms": {
+                    "lens_id": id_list
+                }
+            },
+            "include": include,
+            "size": id_list.len()
+        }).to_string();
+    
+        body
+    }
+
+    let body = body(&id_list, &include);
+    let client = reqwest::Client::new();
+    let response = request_response(&client, api_key, &body)
+            .await?;
+
+    let json_str = response
+        .text()
+        .await?;
+    
+    let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    let ret: Vec<Article> = serde_json::from_value::<Vec<Article>>(json_value["data"].clone())?;
+
+    Ok(ret)
 }
