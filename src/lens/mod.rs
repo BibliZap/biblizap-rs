@@ -141,28 +141,28 @@ pub async fn request_response(client: &reqwest::Client, api_key: &str, body: &st
     }
 }
 
-pub async fn request_articles(id_list: &[&str], include:&[&str], api_key: &str, client: Option<reqwest::Client>) -> Result<Vec<Article>, LensError>{
-    fn body(id_list: &[&str], include: &[&str]) -> String {
-        let body = serde_json::json!(
-        {
-            "query": {
-                "terms": {
-                    "lens_id": id_list
-                }
-            },
-            "include": include,
-            "size": id_list.len()
-        }).to_string();
-    
-        body
-    }
+pub fn request_body(id_list: &[&str], include: &[&str]) -> String {
+    let body = serde_json::json!(
+    {
+        "query": {
+            "terms": {
+                "lens_id": id_list
+            }
+        },
+        "include": include,
+        "size": id_list.len()
+    }).to_string();
 
+    body
+}
+
+pub async fn request_articles(id_list: &[&str], include:&[&str], api_key: &str, client: Option<reqwest::Client>) -> Result<Vec<Article>, LensError>{
     let client = match client {
         Some(t) => t,
         None => reqwest::Client::new()
     };
     
-    let body = body(&id_list, &include);
+    let body = request_body(&id_list, &include);
     let response = request_response(&client, api_key, &body)
             .await?;
 
