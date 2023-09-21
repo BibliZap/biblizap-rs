@@ -4,9 +4,29 @@ use serde::de::{self, Visitor, SeqAccess};
 use serde_json::Map;
 use std::marker::PhantomData;
 
+use thiserror::Error;
+#[derive(Error, Debug)]
+pub enum LensError {
+    #[error("request error")]
+    Request(#[from] reqwest::Error),
+    #[error("parse int error")]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error("rate limit missing")]
+    RateLimitMissing,
+    #[error("request to str error")]
+    RequestToStr(#[from] ToStrError),
+    #[error("serde_json error")]
+    SerdeJson(#[from] serde_json::Error),
+    #[error("value as_str error")]
+    ValueAsStr,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct LensId(pub String);
+
 #[derive(Deserialize, Debug)]
 pub struct Article {
-    pub lens_id: String,
+    pub lens_id: LensId,
     pub title: Option<String>,
     #[serde(rename = "abstract")] 
     pub summary: Option<String>,
@@ -99,20 +119,7 @@ impl<'de> ExternalIdsVisitor {
     }
 }
 
-use thiserror::Error;
-#[derive(Error, Debug)]
-pub enum LensError {
-    #[error("request error")]
-    Request(#[from] reqwest::Error),
-    #[error("parse int error")]
-    ParseInt(#[from] std::num::ParseIntError),
-    #[error("rate limit missing")]
-    RateLimitMissing,
-    #[error("request to str error")]
-    RequestToStr(#[from] ToStrError),
-    #[error("serde_json error")]
-    SerdeJson(#[from] serde_json::Error),
-}
+
 
 pub async fn request_response(client: &reqwest::Client, api_key: &str, body: &str) -> Result<reqwest::Response, LensError> {
     let base_url: &str = "https://api.lens.org/scholarly/search";
@@ -176,3 +183,48 @@ pub async fn request_articles(id_list: &[&str], include:&[&str], api_key: &str, 
 
     Ok(ret)
 }
+
+#[derive(Debug, Default)]
+pub struct References(pub Vec<LensId>);
+
+impl<'de> Deserialize<'de> for References {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>
+    {
+        let visitor = ReferencesVisitor(PhantomData);
+        deserializer.deserialize_seq(visitor)
+    }
+}
+
+struct ReferencesVisitor(PhantomData<fn() -> References>); 
+impl<'de> Visitor<'de> for ReferencesVisitor {
+    type Value = References;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "a vec of keys and values")
+    }
+
+    fn visit_seq<V>(self, mut seq: V) -> Result<References, V::Error>
+    where
+        V: SeqAccess<'de>,
+    {   
+        let mut out = References::default();
+        while let Some(value) = seq.next_element()? {
+            let map: serde_json::Map<String, serde_json::Value> = value;
+            let lens_id = map.get("lens_id");
+            match lens_id {
+                Some(lens_id_value) => {
+                    let lens_id_str = lens_id_value.as_str().ok_or_else(|| de::Error::missing_field("type"))?;
+                    out.0.push(LensId(lens_id_str.to_owned()))
+                },
+                None => (),
+            }
+        }
+        
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ScholarlyCitations(pub Vec<LensId>);
