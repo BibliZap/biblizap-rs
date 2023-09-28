@@ -3,8 +3,8 @@ use serde::{Deserialize, Deserializer};
 use serde::de::{self, Visitor, SeqAccess};
 use serde_json::Map;
 use std::marker::PhantomData;
-
 use thiserror::Error;
+
 #[derive(Error, Debug)]
 pub enum LensError {
     #[error("request error")]
@@ -33,7 +33,7 @@ pub struct Article {
     pub scholarly_citations_count: Option<i32>,
 
     pub external_ids: Option<ExternalIds>,
-    pub authors: Vec<Author>,
+    pub authors: Option<Vec<Author>>,
     pub source: Option<Source>,
     pub year_published: Option<i32>
 }
@@ -69,6 +69,27 @@ impl<'de> Deserialize<'de> for ExternalIds {
     {
         let visitor = ExternalIdsVisitor(PhantomData);
         deserializer.deserialize_seq(visitor)
+    }
+}
+
+pub struct TypedIdList<'a> {
+    pub pmid: Vec<&'a str>,
+    pub lens_id: Vec<&'a str>,
+    pub doi: Vec<&'a str>
+}
+
+impl <'a> TypedIdList<'a> {
+    pub fn from_raw_id_list(id_list: &'a [&str]) -> TypedIdList<'a> {
+        use regex::Regex;
+        let pmid_regex = Regex::new("^[0-9]+$").unwrap();
+        let lens_id_regex = Regex::new("^...-...-...-...-...$").unwrap();
+        let doi_regex = Regex::new("^10\\.").unwrap();
+
+        TypedIdList {
+            pmid: id_list.into_iter().filter(|n| pmid_regex.is_match(*n)).map(|n| *n).collect::<Vec<_>>(),
+            lens_id: id_list.into_iter().filter(|n| lens_id_regex.is_match(*n)).map(|n| *n).collect::<Vec<_>>(),
+            doi : id_list.into_iter().filter(|n| doi_regex.is_match(*n)).map(|n| *n).collect::<Vec<&str>>()
+        }
     }
 }
 
@@ -119,9 +140,11 @@ impl<'de> ExternalIdsVisitor {
     }
 }
 
+pub async fn request_response(client: &reqwest::Client, api_key: &str, id_list: &[&str], id_type: &str, include: &[&str]) -> Result<reqwest::Response, LensError> {
+    request_response_from_body(client, api_key, &make_request_body(id_list, id_type, include)).await
+}
 
-
-pub async fn request_response(client: &reqwest::Client, api_key: &str, body: &str) -> Result<reqwest::Response, LensError> {
+async fn request_response_from_body(client: &reqwest::Client, api_key: &str, body: &str) -> Result<reqwest::Response, LensError> {
     let base_url: &str = "https://api.lens.org/scholarly/search";
 
     loop {
@@ -148,12 +171,12 @@ pub async fn request_response(client: &reqwest::Client, api_key: &str, body: &st
     }
 }
 
-pub fn request_body(id_list: &[&str], include: &[&str]) -> String {
+fn make_request_body(id_list: &[&str], id_type: &str, include: &[&str]) -> String {
     let body = serde_json::json!(
     {
         "query": {
             "terms": {
-                "lens_id": id_list
+                id_type: id_list
             }
         },
         "include": include,
@@ -163,25 +186,70 @@ pub fn request_body(id_list: &[&str], include: &[&str]) -> String {
     body
 }
 
-pub async fn request_articles(id_list: &[&str], include:&[&str], api_key: &str, client: Option<reqwest::Client>) -> Result<Vec<Article>, LensError>{
+pub async fn complete_articles(id_list: &[&str], api_key: &str, client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>{ 
     let client = match client {
-        Some(t) => t,
+        Some(t) => t.to_owned(),
         None => reqwest::Client::new()
     };
-    
-    let body = request_body(&id_list, &include);
-    let response = request_response(&client, api_key, &body)
+
+    let typed_id_list = TypedIdList::from_raw_id_list(id_list);
+
+    let mut complete_articles = Vec::<Article>::with_capacity(id_list.len());
+
+    complete_articles.append(&mut complete_articles_typed(&typed_id_list.pmid, "pmid", api_key, &client).await?);
+    complete_articles.append(&mut complete_articles_typed(&typed_id_list.lens_id, "lens_id", api_key, &client).await?);
+    complete_articles.append(&mut complete_articles_typed(&typed_id_list.doi, "doi", api_key, &client).await?);
+
+    Ok(complete_articles)
+}
+
+async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<Article>, LensError>{
+    let include = ["lens_id","title", "authors", "abstract", "external_ids", "scholarly_citations_count", "source", "year_published"];
+
+    let response = request_response(&client, api_key, &id_list, id_type, &include)
             .await?;
 
-    let json_str = response
-        .text()
-        .await?;
+    let json_str = response.text().await?;
     
     let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
 
     let ret: Vec<Article> = serde_json::from_value::<Vec<Article>>(json_value["data"].clone())?;
 
     Ok(ret)
+}
+
+pub async fn request_references_and_citations_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<LensId>, LensError>{
+    let include = ["lens_id", "references", "scholarly_citations"];
+    let response = request_response(&client, api_key, &id_list, id_type, &include)
+            .await?;
+
+    let json_str = response.text().await?;
+    let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
+
+    let ret = serde_json::from_value::<Vec<ReferencesAndCitations>>(json_value["data"].clone())?
+        .into_iter()
+        .flat_map(|n| n.flatten())
+        .collect::<Vec<_>>();
+    
+    Ok(ret)
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ReferencesAndCitations {
+    #[serde(default)]
+    pub references: References,
+    #[serde(default)]
+    pub scholarly_citations: ScholarlyCitations
+}
+
+impl ReferencesAndCitations {
+    pub fn flatten(&self) -> Vec<LensId> {
+        
+        let references = self.references.0.iter().map(|n| n.to_owned());
+        let scholarly_citations = self.scholarly_citations.0.iter().map(|n| n.to_owned());
+
+        references.chain(scholarly_citations).collect()
+    }
 }
 
 #[derive(Debug, Default)]
