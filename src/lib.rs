@@ -3,11 +3,6 @@ use lens::LensId;
 pub mod lens;
 pub mod pubmed;
 
-fn snowball_onestep_chunk<'a>(lens_ids: impl Iterator<Item = &'a lens::LensId>) -> anyhow::Result<Vec<lens::LensId>> {
-    let out = vec![];
-    let a = lens_ids.into_iter().collect::<Vec<&LensId>>();
-    Ok(out)
-}
 
 #[cfg(test)]
 mod tests {
@@ -34,30 +29,18 @@ mod tests {
     
     #[tokio::test]
     async fn proto() {
-        /*let id_list = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
-        let include = ["lens_id", "references", "scholarly_citations"];
+        let id_list = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
-
-        let typed_id_list = TypedIdList::from_raw_id_list(&id_list);
         let client = reqwest::Client::new();
-        let response = request_response(&client, api_key, &typed_id_list.lens_id, "lens_id", &include).await.unwrap();
+        let new_id = lens::request_references_and_citations(&id_list, api_key, Some(&client)).await.unwrap()
+            .into_iter().map(|n| n.0).collect::<Vec<_>>();
+        println!("{:?}", new_id);
 
-        let json_str = response
-            .text()
-            .await.unwrap();*/
+        let half_owned  = new_id.iter().map(String::as_str).collect::<Vec<_>>();
 
-        let json_str = std::fs::read_to_string("snowball.json").unwrap();
-
-        println!("{json_str}");
-    
-        let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let ret: Vec<lens::LensId> = serde_json::from_value::<Vec<lens::ReferencesAndCitations>>(json_value["data"].clone()).unwrap()
-            .into_iter()
-            .flat_map(|n| n.flatten())
-            .collect::<Vec<_>>();
-        
-
-        println!("{:#?}", ret);
+        let new_id = lens::request_references_and_citations(&half_owned, api_key, Some(&client)).await.unwrap()
+            .into_iter().map(|n| n.0).collect::<Vec<_>>();
+        println!("\n\n\n\n{:?}", new_id);
         return;
         /*let src_lens_id = ["020-200-401-307-33X", "050-708-976-791-252", "30507730"];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
