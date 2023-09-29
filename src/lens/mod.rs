@@ -125,6 +125,52 @@ impl<'de> ExternalIdsVisitor {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct References(pub Vec<LensId>);
+
+impl<'de> Deserialize<'de> for References {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>
+    {
+        let visitor = ReferencesVisitor(PhantomData);
+        deserializer.deserialize_seq(visitor)
+    }
+}
+
+struct ReferencesVisitor(PhantomData<fn() -> References>); 
+impl<'de> Visitor<'de> for ReferencesVisitor {
+    type Value = References;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "a vec of keys and values")
+    }
+
+    fn visit_seq<V>(self, mut seq: V) -> Result<References, V::Error>
+    where
+        V: SeqAccess<'de>,
+    {   
+        let mut out = References::default();
+        while let Some(value) = seq.next_element()? {
+            let map: serde_json::Map<String, serde_json::Value> = value;
+            let lens_id = map.get("lens_id");
+            match lens_id {
+                Some(lens_id_value) => {
+                    let lens_id_str = lens_id_value.as_str().ok_or_else(|| de::Error::missing_field("type"))?;
+                    out.0.push(LensId(lens_id_str.to_owned()))
+                },
+                None => (),
+            }
+        }
+        
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ScholarlyCitations(pub Vec<LensId>);
+
+
 pub async fn request_response(client: &reqwest::Client,
                             api_key: &str,
                             id_list: impl IntoIterator<Item = impl serde::Serialize> + serde::Serialize,
@@ -199,15 +245,21 @@ impl <'a> TypedIdList<'a> {
     }
 }
 
-pub async fn complete_articles(id_list: &[&str], api_key: &str, client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>{ 
+pub async fn complete_articles<T>(id_list: &[T],
+        api_key: &str,
+        client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>
+where
+    T: AsRef<str>
+{
     let client = match client {
         Some(t) => t.to_owned(),
         None => reqwest::Client::new()
     };
+    let iter = id_list.iter().map(|item| item.as_ref());
 
-    let typed_id_list = TypedIdList::from_raw_id_list(id_list.into_iter().cloned());
+    let typed_id_list = TypedIdList::from_raw_id_list(iter.clone());
 
-    let mut complete_articles = Vec::<Article>::with_capacity(id_list.len());
+    let mut complete_articles = Vec::<Article>::with_capacity(iter.len());
 
     complete_articles.append(&mut complete_articles_typed(&typed_id_list.pmid, "pmid", api_key, &client).await?);
     complete_articles.append(&mut complete_articles_typed(&typed_id_list.lens_id, "lens_id", api_key, &client).await?);
@@ -219,8 +271,7 @@ pub async fn complete_articles(id_list: &[&str], api_key: &str, client: Option<&
 async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<Article>, LensError> {
     let include = ["lens_id","title", "authors", "abstract", "external_ids", "scholarly_citations_count", "source", "year_published"];
 
-    let response = request_response(&client, api_key, id_list, id_type, &include)
-            .await?;
+    let response = request_response(&client, api_key, id_list, id_type, &include).await?;
 
     let json_str = response.text().await?;
     
@@ -231,14 +282,13 @@ async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str,
     Ok(ret)
 }
 
-pub async fn request_references_and_citations<I, T>(id_list: I,
+pub async fn request_references_and_citations<T>(id_list: &[T],
         api_key: &str,
         client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
 where
-    I: IntoIterator<Item = T>,
-    T: AsRef<str> {
-    let vec = id_list.into_iter().collect::<Vec<_>>();
-    let iter = vec.iter().map(|item| item.as_ref());
+    T: AsRef<str>
+{
+    let iter = id_list.iter().map(|item| item.as_ref());
 
     let typed_id_list = TypedIdList::from_raw_id_list(iter.clone());
     let mut references_and_citations = Vec::<LensId>::with_capacity(iter.into_iter().count());
@@ -255,10 +305,13 @@ where
     Ok(references_and_citations)
 }
 
-pub async fn request_references_and_citations_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<LensId>, LensError>{
+pub async fn request_references_and_citations_typed(id_list: &[&str],
+        id_type: &str,
+        api_key: &str,
+        client: &reqwest::Client) -> Result<Vec<LensId>, LensError>
+{
     let include = ["lens_id", "references", "scholarly_citations"];
-    let response = request_response(&client, api_key, id_list, id_type, &include)
-            .await?;
+    let response = request_response(&client, api_key, id_list, id_type, &include).await?;
 
     let json_str = response.text().await?;
     let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
@@ -281,7 +334,6 @@ pub struct ReferencesAndCitations {
 
 impl ReferencesAndCitations {
     pub fn flatten(&self) -> Vec<LensId> {
-        
         let references = self.references.0.iter().map(|n| n.to_owned());
         let scholarly_citations = self.scholarly_citations.0.iter().map(|n| n.to_owned());
 
@@ -289,47 +341,23 @@ impl ReferencesAndCitations {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct References(pub Vec<LensId>);
 
-impl<'de> Deserialize<'de> for References {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>
-    {
-        let visitor = ReferencesVisitor(PhantomData);
-        deserializer.deserialize_seq(visitor)
-    }
+
+pub async fn snowball_onestep<T>(id_list: &[T],
+    api_key: &str,
+    client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
+where
+    T: AsRef<str> {
+
+    let output_id = futures::future::join_all(id_list
+        .chunks(1000)
+        .map(|x| request_references_and_citations(x, api_key, client)))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, LensError>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    Ok(output_id)
 }
-
-struct ReferencesVisitor(PhantomData<fn() -> References>); 
-impl<'de> Visitor<'de> for ReferencesVisitor {
-    type Value = References;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(formatter, "a vec of keys and values")
-    }
-
-    fn visit_seq<V>(self, mut seq: V) -> Result<References, V::Error>
-    where
-        V: SeqAccess<'de>,
-    {   
-        let mut out = References::default();
-        while let Some(value) = seq.next_element()? {
-            let map: serde_json::Map<String, serde_json::Value> = value;
-            let lens_id = map.get("lens_id");
-            match lens_id {
-                Some(lens_id_value) => {
-                    let lens_id_str = lens_id_value.as_str().ok_or_else(|| de::Error::missing_field("type"))?;
-                    out.0.push(LensId(lens_id_str.to_owned()))
-                },
-                None => (),
-            }
-        }
-        
-        Ok(out)
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct ScholarlyCitations(pub Vec<LensId>);

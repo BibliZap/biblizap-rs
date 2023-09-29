@@ -26,13 +26,12 @@ mod tests {
         let id_list = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
         let client = reqwest::Client::new();
-        let new_id = lens::request_references_and_citations(&id_list, api_key, Some(&client)).await.unwrap();
+        let new_id = lens::snowball_onestep(&id_list, api_key, Some(&client)).await.unwrap();
         println!("{:?}", new_id);
 
-        let new_id = lens::request_references_and_citations(&new_id, api_key, Some(&client)).await.unwrap();
-        println!("\n\n\n\n{:?}", new_id);
+        let aa = lens::complete_articles(&new_id, api_key, Some(&client)).await.unwrap();
+        println!("\n\n\n\n{:#?}", aa);
+
         return;
     }
-
-    
 }
