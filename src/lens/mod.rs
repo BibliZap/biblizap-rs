@@ -24,6 +24,12 @@ pub enum LensError {
 #[derive(Deserialize, Debug, Clone)]
 pub struct LensId(pub String);
 
+impl AsRef<str> for LensId {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub struct Article {
     pub lens_id: LensId,
@@ -178,16 +184,17 @@ pub struct TypedIdList<'a> {
 }
 
 impl <'a> TypedIdList<'a> {
-    pub fn from_raw_id_list(id_list: &'a [&str]) -> TypedIdList<'a> {
+    pub fn from_raw_id_list<I>(id_list: I) -> TypedIdList<'a>
+    where I: IntoIterator<Item = &'a str>  + Clone {
         use regex::Regex;
         let pmid_regex = Regex::new("^[0-9]+$").unwrap();
         let lens_id_regex = Regex::new("^...-...-...-...-...$").unwrap();
         let doi_regex = Regex::new("^10\\.").unwrap();
 
         TypedIdList {
-            pmid: id_list.into_iter().filter(|n| pmid_regex.is_match(*n)).map(|n| *n).collect::<Vec<_>>(),
-            lens_id: id_list.into_iter().filter(|n| lens_id_regex.is_match(*n)).map(|n| *n).collect::<Vec<_>>(),
-            doi : id_list.into_iter().filter(|n| doi_regex.is_match(*n)).map(|n| *n).collect::<Vec<&str>>()
+            pmid: id_list.clone().into_iter().filter(|n| pmid_regex.is_match(*n)).collect::<Vec<_>>(),
+            lens_id: id_list.clone().into_iter().filter(|n| lens_id_regex.is_match(*n)).collect::<Vec<_>>(),
+            doi : id_list.into_iter().filter(|n| doi_regex.is_match(*n)).collect::<Vec<&str>>()
         }
     }
 }
@@ -198,7 +205,7 @@ pub async fn complete_articles(id_list: &[&str], api_key: &str, client: Option<&
         None => reqwest::Client::new()
     };
 
-    let typed_id_list = TypedIdList::from_raw_id_list(id_list);
+    let typed_id_list = TypedIdList::from_raw_id_list(id_list.into_iter().cloned());
 
     let mut complete_articles = Vec::<Article>::with_capacity(id_list.len());
 
@@ -209,7 +216,7 @@ pub async fn complete_articles(id_list: &[&str], api_key: &str, client: Option<&
     Ok(complete_articles)
 }
 
-async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<Article>, LensError>{
+async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<Article>, LensError> {
     let include = ["lens_id","title", "authors", "abstract", "external_ids", "scholarly_citations_count", "source", "year_published"];
 
     let response = request_response(&client, api_key, id_list, id_type, &include)
@@ -224,14 +231,22 @@ async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str,
     Ok(ret)
 }
 
-pub async fn request_references_and_citations(id_list: &[&str], api_key: &str, client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>{
+pub async fn request_references_and_citations<I, T>(id_list: I,
+        api_key: &str,
+        client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str> {
+    let vec = id_list.into_iter().collect::<Vec<_>>();
+    let iter = vec.iter().map(|item| item.as_ref());
+
+    let typed_id_list = TypedIdList::from_raw_id_list(iter.clone());
+    let mut references_and_citations = Vec::<LensId>::with_capacity(iter.into_iter().count());
+
     let client = match client {
         Some(t) => t.to_owned(),
         None => reqwest::Client::new()
     };
-
-    let typed_id_list = TypedIdList::from_raw_id_list(id_list);
-    let mut references_and_citations = Vec::<LensId>::with_capacity(id_list.into_iter().count());
 
     references_and_citations.append(&mut request_references_and_citations_typed(&typed_id_list.pmid, "pmid", api_key, &client).await?);
     references_and_citations.append(&mut request_references_and_citations_typed(&typed_id_list.lens_id, "lens_id", api_key, &client).await?);
