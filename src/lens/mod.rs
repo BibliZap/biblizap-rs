@@ -231,7 +231,9 @@ pub struct TypedIdList<'a> {
 
 impl <'a> TypedIdList<'a> {
     pub fn from_raw_id_list<I>(id_list: I) -> TypedIdList<'a>
-    where I: IntoIterator<Item = &'a str>  + Clone {
+    where
+        I: IntoIterator<Item = &'a str>  + Clone
+    {
         use regex::Regex;
         let pmid_regex = Regex::new("^[0-9]+$").unwrap();
         let lens_id_regex = Regex::new("^...-...-...-...-...$").unwrap();
@@ -245,7 +247,7 @@ impl <'a> TypedIdList<'a> {
     }
 }
 
-pub async fn complete_articles<T>(id_list: &[T],
+pub async fn complete_articles_chunk<T>(id_list: &[T],
         api_key: &str,
         client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>
 where
@@ -283,6 +285,25 @@ async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str,
 }
 
 pub async fn request_references_and_citations<T>(id_list: &[T],
+    api_key: &str,
+    client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
+where
+    T: AsRef<str>
+{
+    let output_id = futures::future::join_all(id_list
+        .chunks(1000)
+        .map(|x| request_references_and_citations_chunk(x, api_key, client)))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, LensError>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    Ok(output_id)
+}
+
+pub async fn request_references_and_citations_chunk<T>(id_list: &[T],
         api_key: &str,
         client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
 where
@@ -298,14 +319,14 @@ where
         None => reqwest::Client::new()
     };
 
-    references_and_citations.append(&mut request_references_and_citations_typed(&typed_id_list.pmid, "pmid", api_key, &client).await?);
-    references_and_citations.append(&mut request_references_and_citations_typed(&typed_id_list.lens_id, "lens_id", api_key, &client).await?);
-    references_and_citations.append(&mut request_references_and_citations_typed(&typed_id_list.doi, "doi", api_key, &client).await?);
+    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.pmid, "pmid", api_key, &client).await?);
+    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.lens_id, "lens_id", api_key, &client).await?);
+    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.doi, "doi", api_key, &client).await?);
 
     Ok(references_and_citations)
 }
 
-pub async fn request_references_and_citations_typed(id_list: &[&str],
+async fn request_references_and_citations_typed_chunk(id_list: &[&str],
         id_type: &str,
         api_key: &str,
         client: &reqwest::Client) -> Result<Vec<LensId>, LensError>
@@ -341,23 +362,23 @@ impl ReferencesAndCitations {
     }
 }
 
-
-
-pub async fn snowball_onestep<T>(id_list: &[T],
+pub async fn snowball<T>(src_pmid: &[T], max_depth: u8,
     api_key: &str,
-    client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
+    client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>
 where
     T: AsRef<str> {
+    let mut all_pmid : Vec<LensId> = Vec::new();
 
-    let output_id = futures::future::join_all(id_list
-        .chunks(1000)
-        .map(|x| request_references_and_citations(x, api_key, client)))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, LensError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let mut current_pmid = src_pmid
+        .iter()
+        .map(|x| LensId(x.as_ref().to_owned()))
+        .collect::<Vec<LensId>>();
 
-    Ok(output_id)
+    for _ in 0..max_depth {
+        current_pmid = request_references_and_citations(&current_pmid, api_key, client).await?;
+
+        all_pmid.append(&mut current_pmid.clone());
+    }
+
+    Ok(all_pmid)
 }

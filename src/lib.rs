@@ -12,7 +12,7 @@ mod tests {
 
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
 
-        let articles = lens::complete_articles(&src_id, api_key, None).await.unwrap();
+        let articles = lens::complete_articles_chunk(&src_id, api_key, None).await.unwrap();
 
         assert_eq!(articles.len(), src_id.len());
 
@@ -26,11 +26,8 @@ mod tests {
         let id_list = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
         let client = reqwest::Client::new();
-        let new_id = lens::snowball_onestep(&id_list, api_key, Some(&client)).await.unwrap();
-        println!("{:?}", new_id);
-
-        let aa = lens::complete_articles(&new_id, api_key, Some(&client)).await.unwrap();
-        println!("\n\n\n\n{:#?}", aa);
+        let new_id = lens::snowball(&id_list, 2, api_key, Some(&client)).await.unwrap();
+        println!("{:?} {}", new_id, new_id.len());
 
         return;
     }
