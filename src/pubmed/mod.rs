@@ -130,7 +130,7 @@ async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
 pub async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
     let dest_pmid = futures::future::join_all(src_pmid
             .chunks(325)
-            .map(|x| snowball_onestep_unsafe(x) ))
+            .map(snowball_onestep_unsafe))
         .await
         .into_iter()
         .collect::<Result<Vec<_>>>()?
@@ -146,7 +146,7 @@ pub async fn snowball(src_pmid: &[&str], max_depth: u8) -> Result<Vec<String>> {
     
     let mut current_pmid = src_pmid
         .iter()
-        .map(|x| *x)
+        .cloned()
         .map(|x| x.to_owned())
         .collect::<Vec<String>>();
 

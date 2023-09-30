@@ -154,12 +154,9 @@ impl<'de> Visitor<'de> for ReferencesVisitor {
         while let Some(value) = seq.next_element()? {
             let map: serde_json::Map<String, serde_json::Value> = value;
             let lens_id = map.get("lens_id");
-            match lens_id {
-                Some(lens_id_value) => {
-                    let lens_id_str = lens_id_value.as_str().ok_or_else(|| de::Error::missing_field("type"))?;
-                    out.0.push(LensId(lens_id_str.to_owned()))
-                },
-                None => (),
+            if let Some(lens_id_value) = lens_id {
+                let lens_id_str = lens_id_value.as_str().ok_or_else(|| de::Error::missing_field("type"))?;
+                out.0.push(LensId(lens_id_str.to_owned()))
             }
         }
         
@@ -209,7 +206,7 @@ async fn request_response_with_body(client: &reqwest::Client, api_key: &str, bod
 fn make_request_body(id_list: impl IntoIterator<Item = impl serde::Serialize> + serde::Serialize,
                     id_type: &str,
                     include: &[&str]) -> String {
-    let body = serde_json::json!(
+    serde_json::json!(
     {
         "query": {
             "terms": {
@@ -218,9 +215,7 @@ fn make_request_body(id_list: impl IntoIterator<Item = impl serde::Serialize> + 
         },
         "include": include,
         "size": id_list.into_iter().count()
-    }).to_string();
-
-    body
+    }).to_string()
 }
 
 pub struct TypedIdList<'a> {
@@ -240,11 +235,30 @@ impl <'a> TypedIdList<'a> {
         let doi_regex = Regex::new("^10\\.").unwrap();
 
         TypedIdList {
-            pmid: id_list.clone().into_iter().filter(|n| pmid_regex.is_match(*n)).collect::<Vec<_>>(),
-            lens_id: id_list.clone().into_iter().filter(|n| lens_id_regex.is_match(*n)).collect::<Vec<_>>(),
-            doi : id_list.into_iter().filter(|n| doi_regex.is_match(*n)).collect::<Vec<&str>>()
+            pmid: id_list.clone().into_iter().filter(|n| pmid_regex.is_match(n)).collect::<Vec<_>>(),
+            lens_id: id_list.clone().into_iter().filter(|n| lens_id_regex.is_match(n)).collect::<Vec<_>>(),
+            doi : id_list.into_iter().filter(|n| doi_regex.is_match(n)).collect::<Vec<&str>>()
         }
     }
+}
+
+pub async fn complete_articles<T>(id_list: &[T],
+    api_key: &str,
+    client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>
+where
+    T: AsRef<str>
+{
+    let output_id = futures::future::join_all(id_list
+        .chunks(1000)
+        .map(|x| complete_articles_chunk(x, api_key, client)))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, LensError>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    Ok(output_id)
 }
 
 pub async fn complete_articles_chunk<T>(id_list: &[T],
@@ -273,7 +287,7 @@ where
 async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<Article>, LensError> {
     let include = ["lens_id","title", "authors", "abstract", "external_ids", "scholarly_citations_count", "source", "year_published"];
 
-    let response = request_response(&client, api_key, id_list, id_type, &include).await?;
+    let response = request_response(client, api_key, id_list, id_type, &include).await?;
 
     let json_str = response.text().await?;
     
@@ -332,7 +346,7 @@ async fn request_references_and_citations_typed_chunk(id_list: &[&str],
         client: &reqwest::Client) -> Result<Vec<LensId>, LensError>
 {
     let include = ["lens_id", "references", "scholarly_citations"];
-    let response = request_response(&client, api_key, id_list, id_type, &include).await?;
+    let response = request_response(client, api_key, id_list, id_type, &include).await?;
 
     let json_str = response.text().await?;
     let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
@@ -381,4 +395,36 @@ where
     }
 
     Ok(all_pmid)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn complete_articles_test() {
+        let src_id = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
+
+        let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
+
+        let articles = complete_articles(&src_id, api_key, None).await.unwrap();
+
+        assert_eq!(articles.len(), src_id.len());
+
+        for article in articles.into_iter() {
+            println!("{:#?}", article);
+        }
+    }
+    
+    #[tokio::test]
+    async fn snowball_test() {
+        let id_list = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
+        let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
+        let client = reqwest::Client::new();
+        let new_id = snowball(&id_list, 2, api_key, Some(&client)).await.unwrap();
+
+        let articles = complete_articles(&new_id[0..500], api_key, Some(&client)).await.unwrap();
+        println!("{:#?}", articles);
+    }
 }
