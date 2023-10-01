@@ -10,7 +10,7 @@ use article::Article;
 use request::request_response;
 use citations::ReferencesAndCitations;
 
-pub struct TypedIdList<'a> {
+struct TypedIdList<'a> {
     pub pmid: Vec<&'a str>,
     pub lens_id: Vec<&'a str>,
     pub doi: Vec<&'a str>
@@ -53,7 +53,7 @@ where
     Ok(output_id)
 }
 
-pub async fn complete_articles_chunk<T>(id_list: &[T],
+async fn complete_articles_chunk<T>(id_list: &[T],
         api_key: &str,
         client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>
 where
@@ -91,7 +91,7 @@ async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str,
     Ok(ret)
 }
 
-pub async fn request_references_and_citations<T>(id_list: &[T],
+async fn request_references_and_citations<T>(id_list: &[T],
     api_key: &str,
     client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
 where
@@ -110,7 +110,7 @@ where
     Ok(output_id)
 }
 
-pub async fn request_references_and_citations_chunk<T>(id_list: &[T],
+async fn request_references_and_citations_chunk<T>(id_list: &[T],
         api_key: &str,
         client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
 where
