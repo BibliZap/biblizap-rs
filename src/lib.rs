@@ -35,7 +35,10 @@ impl From<lens::article::Article> for Article {
     }
 }
 
-pub async fn snowball(id_list: &[&str], max_depth: u8, output_max_size: usize, api_key: &str) -> Result<Vec<Article>, Error> {
+pub async fn snowball<T>(id_list: &[T], max_depth: u8, output_max_size: usize, api_key: &str) -> Result<Vec<Article>, Error>
+where
+    T: AsRef<str>
+{
     let client = reqwest::Client::new();
     let snowball_id = lens::snowball(id_list, max_depth, api_key, Some(&client)).await?;
 
