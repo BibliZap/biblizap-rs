@@ -19,7 +19,7 @@ pub struct Article {
     pub year_published: Option<i32>
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ExternalIds {
     pub pmid: Vec<String>,
     pub doi: Vec<String>,
@@ -28,7 +28,7 @@ pub struct ExternalIds {
     pub magid: Vec<String>
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default, Clone)]
 pub struct Author {
     pub first_name: Option<String>,
     pub initials: Option<String>,
@@ -100,3 +100,24 @@ impl<'de> ExternalIdsVisitor {
     }
 }
 
+
+impl Article {
+    pub fn first_author_name(&self) -> Option<String> {
+        let authors = self.authors.clone()?;
+        let author = authors.get(0)?;
+    
+        Some(format!("{} {}", author.first_name.clone().unwrap_or_default(), author.last_name.clone().unwrap_or_default()))
+    }
+    
+    pub fn pmid(&self) -> Option<String> {
+        let external_ids = self.external_ids.clone()?;
+        let id = external_ids.doi.get(0)?.to_owned();
+        Some(id)
+    }
+
+    pub fn doi(&self) -> Option<String> {
+        let external_ids = self.external_ids.clone()?;
+        let id = external_ids.doi.get(0)?.to_owned();
+        Some(id)
+    }
+}
