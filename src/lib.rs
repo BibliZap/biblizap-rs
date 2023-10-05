@@ -8,7 +8,9 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("lens error")]
-    LensError(#[from] lens::error::LensError)
+    LensError(#[from] lens::error::LensError),
+    #[error("empty snowball")]
+    EmptySnowball
 }
 
 #[derive(Debug)]
@@ -39,6 +41,9 @@ pub async fn snowball<T>(id_list: &[T], max_depth: u8, output_max_size: usize, a
 where
     T: AsRef<str>
 {
+    if id_list.is_empty() {
+        return Err(Error::EmptySnowball)
+    }
     let client = reqwest::Client::new();
     let snowball_id = lens::snowball(id_list, max_depth, api_key, Some(&client)).await?;
 
