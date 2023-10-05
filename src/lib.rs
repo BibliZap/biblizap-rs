@@ -41,7 +41,7 @@ pub async fn snowball<T>(id_list: &[T], max_depth: u8, output_max_size: usize, a
 where
     T: AsRef<str>
 {
-    if id_list.is_empty() {
+    if id_list.is_empty() || id_list.first().unwrap().as_ref() == "" {
         return Err(Error::EmptySnowball)
     }
     let client = reqwest::Client::new();
@@ -53,10 +53,10 @@ where
             *m.entry(x.to_owned()).or_default() += 1;
             m
         });
-
+    
     let mut s = score_hashmap.iter().collect::<Vec<_>>();
     s.sort_by_key(|x| std::cmp::Reverse(x.1));
-    let _ = s.split_off(output_max_size);
+    s.truncate(output_max_size);
 
     let selected_id = s
         .into_iter()
@@ -93,8 +93,19 @@ mod tests {
         let id_list = ["020-200-401-307-33X"];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
 
-        let a = snowball(&id_list, 2, 10, api_key).await.unwrap();
+        let articles = snowball(&id_list, 2, 10, api_key).await.unwrap();
 
-        println!("{:#?}", a);
+        assert_eq!(articles.len(), 10);
+
+        println!("{:#?}", articles);
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn empty_snowball() {
+        let id_list = [""];
+        let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
+
+        let _ = snowball(&id_list, 2, 10, api_key).await.unwrap();
     }
 }
