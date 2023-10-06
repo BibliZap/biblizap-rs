@@ -4,7 +4,7 @@ pub mod lens;
 pub mod pubmed;
 
 use thiserror::Error;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -14,7 +14,7 @@ pub enum Error {
     EmptySnowball
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Article {
     pub first_author: Option<String>,
     pub year_published: Option<i32>,
