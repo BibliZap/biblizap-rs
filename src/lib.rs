@@ -2,9 +2,11 @@ use lens::lensid;
 
 pub mod lens;
 pub mod pubmed;
+pub mod common;
 
 use thiserror::Error;
 use serde::{Serialize, Deserialize};
+pub use common::SearchFor;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -38,7 +40,7 @@ impl From<lens::article::Article> for Article {
     }
 }
 
-pub async fn snowball<T>(id_list: &[T], max_depth: u8, output_max_size: usize, api_key: &str) -> Result<Vec<Article>, Error>
+pub async fn snowball<T>(id_list: &[T], max_depth: u8, output_max_size: usize, search_for: &SearchFor, api_key: &str) -> Result<Vec<Article>, Error>
 where
     T: AsRef<str>
 {
@@ -46,7 +48,7 @@ where
         return Err(Error::EmptySnowball)
     }
     let client = reqwest::Client::new();
-    let snowball_id = lens::snowball(id_list, max_depth, api_key, Some(&client)).await?;
+    let snowball_id = lens::snowball(id_list, max_depth, search_for, api_key, Some(&client)).await?;
 
     let score_hashmap = snowball_id
         .iter()
@@ -94,7 +96,7 @@ mod tests {
         let id_list = ["020-200-401-307-33X"];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
 
-        let articles = snowball(&id_list, 2, 10, api_key).await.unwrap();
+        let articles = snowball(&id_list, 2, 10, &SearchFor::Both, api_key).await.unwrap();
 
         assert_eq!(articles.len(), 10);
 
@@ -107,6 +109,6 @@ mod tests {
         let id_list = [""];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
 
-        let _ = snowball(&id_list, 2, 10, api_key).await.unwrap();
+        let _ = snowball(&id_list, 2, 10, &SearchFor::Both, api_key).await.unwrap();
     }
 }

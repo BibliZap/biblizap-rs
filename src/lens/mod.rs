@@ -4,6 +4,8 @@ pub mod article;
 pub mod request;
 pub mod citations;
 
+use super::common::SearchFor;
+
 use lensid::LensId;
 use error::LensError;
 use article::Article;
@@ -92,6 +94,7 @@ async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str,
 }
 
 async fn request_references_and_citations<T>(id_list: &[T],
+    search_for: &SearchFor,
     api_key: &str,
     client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
 where
@@ -99,7 +102,7 @@ where
 {
     let output_id = futures::future::join_all(id_list
         .chunks(1000)
-        .map(|x| request_references_and_citations_chunk(x, api_key, client)))
+        .map(|x| request_references_and_citations_chunk(x, search_for, api_key, client)))
         .await
         .into_iter()
         .collect::<Result<Vec<_>, LensError>>()?
@@ -111,6 +114,7 @@ where
 }
 
 async fn request_references_and_citations_chunk<T>(id_list: &[T],
+        search_for: &SearchFor,
         api_key: &str,
         client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError> 
 where
@@ -126,19 +130,24 @@ where
         None => reqwest::Client::new()
     };
 
-    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.pmid, "pmid", api_key, &client).await?);
-    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.lens_id, "lens_id", api_key, &client).await?);
-    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.doi, "doi", api_key, &client).await?);
+    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.pmid, "pmid", search_for, api_key, &client).await?);
+    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.lens_id, "lens_id", search_for, api_key, &client).await?);
+    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.doi, "doi", search_for, api_key, &client).await?);
 
     Ok(references_and_citations)
 }
 
 async fn request_references_and_citations_typed_chunk(id_list: &[&str],
         id_type: &str,
+        search_for: &SearchFor,
         api_key: &str,
         client: &reqwest::Client) -> Result<Vec<LensId>, LensError>
 {
-    let include = ["lens_id", "references", "scholarly_citations"];
+    let include = match search_for {
+        SearchFor::Both => vec!["lens_id", "references", "scholarly_citations"],
+        SearchFor::Citations => vec!["lens_id", "scholarly_citations"],
+        SearchFor::References => vec!["lens_id", "references"]
+    };
     let response = request_response(client, api_key, id_list, id_type, &include).await?;
 
     let json_str = response.text().await?;
@@ -146,13 +155,15 @@ async fn request_references_and_citations_typed_chunk(id_list: &[&str],
 
     let ret = serde_json::from_value::<Vec<ReferencesAndCitations>>(json_value["data"].clone())?
         .into_iter()
-        .flat_map(|n| n.flatten())
+        .flat_map(|n| n.get_both())
         .collect::<Vec<_>>();
     
     Ok(ret)
 }
 
-pub async fn snowball<T>(src_pmid: &[T], max_depth: u8,
+pub async fn snowball<T>(src_pmid: &[T],
+    max_depth: u8,
+    search_for: &SearchFor,
     api_key: &str,
     client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>
 where
@@ -165,7 +176,7 @@ where
         .collect::<Vec<LensId>>();
 
     for _ in 0..max_depth {
-        current_pmid = request_references_and_citations(&current_pmid, api_key, client).await?;
+        current_pmid = request_references_and_citations(&current_pmid, search_for, api_key, client).await?;
 
         all_pmid.append(&mut current_pmid.clone());
     }
@@ -198,7 +209,7 @@ mod tests {
         let id_list = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
         let client = reqwest::Client::new();
-        let new_id = snowball(&id_list, 2, api_key, Some(&client)).await.unwrap();
+        let new_id = snowball(&id_list, 2, &SearchFor::Both, api_key, Some(&client)).await.unwrap();
         
         assert_eq!(new_id.len(), 84448);
         

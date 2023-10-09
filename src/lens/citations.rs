@@ -58,7 +58,7 @@ pub struct ReferencesAndCitations {
 }
 
 impl ReferencesAndCitations {
-    pub fn flatten(&self) -> Vec<LensId> {
+    pub fn get_both(&self) -> Vec<LensId> {
         let references = self.references.0.iter().map(|n| n.to_owned());
         let scholarly_citations = self.scholarly_citations.0.iter().map(|n| n.to_owned());
 
