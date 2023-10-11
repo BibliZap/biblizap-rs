@@ -23,6 +23,7 @@ pub struct Article {
     pub title: Option<String>,
     pub summary: Option<String>,
     pub doi: Option<String>,
+    pub citations: Option<i32>,
     pub score: Option<i32>
 }
 
@@ -35,6 +36,7 @@ impl From<lens::article::Article> for Article {
             title: article.title.to_owned(),
             summary: article.summary.to_owned(),
             doi: article.doi(),
+            citations: article.scholarly_citations_count,
             score: None
         }
     }
