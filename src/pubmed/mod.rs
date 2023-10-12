@@ -100,8 +100,8 @@ impl Article {
 
     pub async fn complete_articles(src_pmid: &[&str]) -> Result<Vec<Article>> {
         let raw_articles = Article::request_raw_articles(src_pmid).await?;
-        let ret = Ok(Article::from_raw_articles(&raw_articles)?.collect());
-        ret
+        let ret = Article::from_raw_articles(&raw_articles)?.collect();
+        Ok(ret)
     }
 }
 
