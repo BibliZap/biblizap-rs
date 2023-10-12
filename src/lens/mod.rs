@@ -211,7 +211,7 @@ mod tests {
         let client = reqwest::Client::new();
         let new_id = snowball(&id_list, 2, &SearchFor::Both, api_key, Some(&client)).await.unwrap();
         
-        assert_eq!(new_id.len(), 84448);
+        assert_eq!(new_id.len(), 84570);
         
         let score_hashmap = new_id
             .into_iter()
@@ -219,7 +219,7 @@ mod tests {
                 *m.entry(x).or_default() += 1;
                 m
             });
-        assert_eq!(score_hashmap.len(), 74541);
+        assert_eq!(score_hashmap.len(), 74657);
 
         let max_score_lens_id = score_hashmap.iter().max_by_key(|entry | entry.1).unwrap();
         assert_eq!(max_score_lens_id.0.as_ref(), "050-708-976-791-252");
