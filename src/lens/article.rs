@@ -35,7 +35,7 @@ pub struct Author {
     pub last_name: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Source {
     pub publisher: Option<String>,
     pub title: Option<String>,
@@ -119,5 +119,11 @@ impl Article {
         let external_ids = self.external_ids.clone()?;
         let id = external_ids.doi.get(0)?.to_owned();
         Some(id)
+    }
+
+    pub fn publisher(&self) -> Option<String> {
+        let source = self.source.clone()?;
+
+        source.publisher
     }
 }
