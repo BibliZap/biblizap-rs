@@ -121,9 +121,9 @@ impl Article {
         Some(id)
     }
 
-    pub fn publisher(&self) -> Option<String> {
+    pub fn journal(&self) -> Option<String> {
         let source = self.source.clone()?;
-
-        source.publisher
+        
+        source.title
     }
 }

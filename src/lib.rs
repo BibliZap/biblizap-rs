@@ -20,7 +20,7 @@ pub enum Error {
 pub struct Article {
     pub first_author: Option<String>,
     pub year_published: Option<i32>,
-    pub publisher: Option<String>,
+    pub journal: Option<String>,
     pub title: Option<String>,
     pub summary: Option<String>,
     pub doi: Option<String>,
@@ -34,7 +34,7 @@ impl From<lens::article::Article> for Article {
         Article {
             first_author: article.first_author_name(),
             year_published: article.year_published,
-            publisher: article.publisher(),
+            journal: article.journal(),
             title: article.title.to_owned(),
             summary: article.summary.to_owned(),
             doi: article.doi(),
