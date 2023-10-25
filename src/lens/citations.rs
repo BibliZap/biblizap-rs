@@ -36,7 +36,7 @@ impl<'de> Visitor<'de> for ReferencesVisitor {
             let lens_id = map.get("lens_id");
             if let Some(lens_id_value) = lens_id {
                 let lens_id_str = lens_id_value.as_str().ok_or_else(|| de::Error::missing_field("type"))?;
-                out.0.push(LensId(lens_id_str.to_owned()))
+                out.0.push(LensId::from(lens_id_str))
             }
         }
         

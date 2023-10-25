@@ -161,27 +161,27 @@ async fn request_references_and_citations_typed_chunk(id_list: &[&str],
     Ok(ret)
 }
 
-pub async fn snowball<T>(src_pmid: &[T],
+pub async fn snowball<T>(src_lensid: &[T],
     max_depth: u8,
     search_for: &SearchFor,
     api_key: &str,
     client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>
 where
     T: AsRef<str> {
-    let mut all_pmid : Vec<LensId> = Vec::new();
+    let mut all_lensid : Vec<LensId> = Vec::new();
 
-    let mut current_pmid = src_pmid
+    let mut current_lensid = src_lensid
         .iter()
-        .map(|x| LensId(x.as_ref().to_owned()))
+        .map(|x| LensId::from(x.as_ref()))
         .collect::<Vec<LensId>>();
 
     for _ in 0..max_depth {
-        current_pmid = request_references_and_citations(&current_pmid, search_for, api_key, client).await?;
+        current_lensid = request_references_and_citations(&current_lensid, search_for, api_key, client).await?;
 
-        all_pmid.append(&mut current_pmid.clone());
+        all_lensid.append(&mut current_lensid.clone());
     }
 
-    Ok(all_pmid)
+    Ok(all_lensid)
 }
 
 

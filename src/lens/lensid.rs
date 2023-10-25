@@ -1,7 +1,8 @@
-use serde::Deserialize;
+use arrayvec::ArrayString;
+use serde::{Serialize, Deserialize};
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LensId(pub String);
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LensId(pub ArrayString<19>);
 
 impl AsRef<str> for LensId {
     fn as_ref(&self) -> &str {
@@ -11,6 +12,6 @@ impl AsRef<str> for LensId {
 
 impl From<&str> for LensId {
     fn from(s: &str) -> Self {
-        LensId(s.to_string())
+        LensId(ArrayString::from(s).expect("lens id string must be 19 characters"))
     }
 }
