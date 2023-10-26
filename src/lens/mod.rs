@@ -170,12 +170,10 @@ where
     T: AsRef<str> {
     let mut all_lensid : Vec<LensId> = Vec::new();
 
-    let mut current_lensid = src_lensid
-        .iter()
-        .map(|x| LensId::from(x.as_ref()))
-        .collect::<Vec<LensId>>();
+    let mut current_lensid = request_references_and_citations(src_lensid, search_for, api_key, client).await?;
+    all_lensid.append(&mut current_lensid.clone());
 
-    for _ in 0..max_depth {
+    for _ in 1..max_depth {
         current_lensid = request_references_and_citations(&current_lensid, search_for, api_key, client).await?;
 
         all_lensid.append(&mut current_lensid.clone());
