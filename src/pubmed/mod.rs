@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(articles.len(), 1);
 
         let article = articles
-            .get(0)
+            .first()
             .expect("One article must be returned");
         
         let expected_article = Article {
