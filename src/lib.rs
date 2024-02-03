@@ -54,9 +54,11 @@ where
     let client = reqwest::Client::new();
     let snowball_id = lens::snowball(id_list, max_depth, search_for, api_key, Some(&client)).await?;
 
+    let map_capacity = snowball_id.len();
     let score_hashmap = snowball_id
         .iter()
-        .fold(std::collections::HashMap::<lens::lensid::LensId, i32>::new(), |mut m, x| {
+        .fold(nohash_hasher::IntMap::<lens::lensid::LensId, i32>::with_capacity_and_hasher(map_capacity, std::hash::BuildHasherDefault::default()),
+            |mut m, x| {
             *m.entry(x.to_owned()).or_default() += 1;
             m
         });
