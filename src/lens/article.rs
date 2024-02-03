@@ -104,20 +104,20 @@ impl<'de> ExternalIdsVisitor {
 impl Article {
     pub fn first_author_name(&self) -> Option<String> {
         let authors = self.authors.clone()?;
-        let author = authors.get(0)?;
+        let author = authors.first()?;
     
         Some(format!("{} {}", author.first_name.clone().unwrap_or_default(), author.last_name.clone().unwrap_or_default()))
     }
     
     pub fn pmid(&self) -> Option<String> {
         let external_ids = self.external_ids.clone()?;
-        let id = external_ids.doi.get(0)?.to_owned();
+        let id = external_ids.doi.first()?.to_owned();
         Some(id)
     }
 
     pub fn doi(&self) -> Option<String> {
         let external_ids = self.external_ids.clone()?;
-        let id = external_ids.doi.get(0)?.to_owned();
+        let id = external_ids.doi.first()?.to_owned();
         Some(id)
     }
 
