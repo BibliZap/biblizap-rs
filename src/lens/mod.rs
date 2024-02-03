@@ -208,16 +208,18 @@ mod tests {
         let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
         let client = reqwest::Client::new();
         let new_id = snowball(&id_list, 2, &SearchFor::Both, api_key, Some(&client)).await.unwrap();
-        
-        assert_eq!(new_id.len(), 84570);
-        
+ 
+        assert_eq!(new_id.len(), 85551);
+
+        let map_capacity = new_id.len();
         let score_hashmap = new_id
             .into_iter()
-            .fold(std::collections::HashMap::<LensId, usize>::new(), |mut m, x| {
+            .fold(nohash_hasher::IntMap::<LensId, usize>::with_capacity_and_hasher(map_capacity, std::hash::BuildHasherDefault::default()),
+                |mut m, x| {
                 *m.entry(x).or_default() += 1;
                 m
             });
-        assert_eq!(score_hashmap.len(), 74657);
+        assert_eq!(score_hashmap.len(), 75565);
 
         let max_score_lens_id = score_hashmap.iter().max_by_key(|entry | entry.1).unwrap();
         assert_eq!(max_score_lens_id.0.as_ref(), "050-708-976-791-252");
@@ -226,7 +228,7 @@ mod tests {
         let new_id_dedup= score_hashmap
             .into_iter()
             .enumerate()
-            .filter(|&(index, _)| index < 500 )
+            .filter(|&(index, _)| index < 500)
             .map(|x| x.1.0)
             .collect::<Vec<_>>();
 

@@ -33,10 +33,13 @@ impl<'de> Visitor<'de> for ReferencesVisitor {
         let mut out = References::default();
         while let Some(value) = seq.next_element()? {
             let map: serde_json::Map<String, serde_json::Value> = value;
-            let lens_id = map.get("lens_id");
-            if let Some(lens_id_value) = lens_id {
-                let lens_id_str = lens_id_value.as_str().ok_or_else(|| de::Error::missing_field("type"))?;
-                out.0.push(LensId::from(lens_id_str))
+            let lensid_value = map.get("lens_id");
+            if let Some(lensid_value) = lensid_value {
+                let lensid_str = lensid_value.as_str()
+                    .ok_or_else(|| de::Error::custom("error converting lensid value to string"))?;
+                let lensid = LensId::try_from(lensid_str)
+                    .ok().ok_or_else(|| de::Error::custom("invalid lensid"))?;
+                out.0.push(lensid)
             }
         }
         
