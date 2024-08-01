@@ -83,7 +83,7 @@ impl std::hash::Hash for LensId {
 impl nohash_hasher::IsEnabled for LensId {}
 
 impl LensId {
-    pub fn from_str_unchecked(lensid_str: &str) -> Self {
+    fn from_str_unchecked(lensid_str: &str) -> Self {
         let lensid_int: u64 = lensid_str
             .chars()
             .take(18)
