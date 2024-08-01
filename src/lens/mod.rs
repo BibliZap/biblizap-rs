@@ -168,7 +168,7 @@ pub async fn snowball<T>(src_lensid: &[T],
     client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>
 where
     T: AsRef<str> {
-    let mut all_lensid : Vec<LensId> = Vec::new();
+    let mut all_lensid : Vec<LensId> = Vec::with_capacity(probable_output_size(max_depth));
 
     let mut current_lensid = request_references_and_citations(src_lensid, search_for, api_key, client).await?;
     all_lensid.append(&mut current_lensid.clone());
@@ -176,16 +176,27 @@ where
     for _ in 1..max_depth {
         current_lensid = request_references_and_citations(&current_lensid, search_for, api_key, client).await?;
 
-        all_lensid.append(&mut current_lensid.clone());
+        all_lensid.append(&mut current_lensid);
     }
 
     Ok(all_lensid)
 }
 
+fn probable_output_size(max_depth: u8) -> usize {
+    let max_depth = max_depth as usize;
+    100 << (7 * (max_depth-1)) // around 100^(max_depth-1) but fast
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probable_output_size_test() {
+        assert_eq!(probable_output_size(1), 100);
+        assert_eq!(probable_output_size(2), 12800);
+        assert_eq!(probable_output_size(3), 1638400);
+    }
 
     #[tokio::test]
     async fn complete_articles_test() {
@@ -224,7 +235,7 @@ mod tests {
         let max_score_lens_id = score_hashmap.iter().max_by_key(|entry | entry.1).unwrap();
         assert_eq!(max_score_lens_id.0.as_ref(), "050-708-976-791-252");
         assert_eq!(*max_score_lens_id.1, 67usize);
-                
+        
         let new_id_dedup= score_hashmap
             .into_iter()
             .enumerate()
