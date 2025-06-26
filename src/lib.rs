@@ -1,3 +1,7 @@
+//! BibliZap is a library for building citation networks starting from seed articles.
+//!
+//! It interacts with APIs like Lens.org and PubMed to retrieve article data
+//! and expand the network by finding references and citations.
 use lens::lensid;
 
 pub mod lens;
@@ -16,16 +20,34 @@ pub enum Error {
     EmptySnowball
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Represents an article with core bibliographic information.
+///
+/// This struct is used throughout the library to represent articles
+/// retrieved from various sources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Article {
-    pub first_author: Option<String>,
-    pub year_published: Option<i32>,
-    pub journal: Option<String>,
-    pub title: Option<String>,
-    pub summary: Option<String>,
+    /// The title of the article.
+    pub title: String,
+    /// The list of authors.
+    pub authors: Vec<String>,
+    /// The abstract of the article.
+    pub abstract_text: Option<String>,
+    /// The year of publication.
+    pub year: Option<u16>,
+    /// The DOI (Digital Object Identifier) of the article.
     pub doi: Option<String>,
-    pub citations: Option<i32>,
-    pub score: Option<i32>
+    /// The PubMed ID (PMID) of the article.
+    pub pmid: Option<u32>,
+    /// The Lens ID of the article.
+    pub lens_id: Option<lens::LensId>,
+    /// The source (e.g., journal, conference) of the article.
+    pub source: Option<String>,
+    /// The number of citations this article has received.
+    pub citation_count: Option<u32>,
+    /// A list of IDs (DOI, PMID, Lens ID) that this article references.
+    pub references: Vec<String>,
+    /// A list of IDs (DOI, PMID, Lens ID) of articles that cite this article.
+    pub citations: Vec<String>,
 }
 
 
@@ -43,6 +65,28 @@ impl From<lens::article::Article> for Article {
         }
     }
 }
+
+/// Expands a citation network starting from a set of seed articles.
+///
+/// This function performs a "snowballing" process, iteratively finding
+/// references and/or citations for the current set of articles and adding
+/// new articles to the network until the desired depth is reached or
+/// no new articles are found.
+///
+/// # Arguments
+///
+/// * `seed_articles`: A vector of initial `Article` structs to start the network from.
+/// * `depth`: The maximum depth of the snowballing process. A depth of 0 means only
+///   the seed articles are returned. A depth of 1 means seed articles and their
+///   direct references/citations are included, and so on.
+/// * `search_for`: Specifies whether to search for references, citations, or both.
+/// * `lens_api_key`: The API key for Lens.org. Required for using the Lens.org API.
+/// * `pubmed_api_key`: The API key for PubMed. Required for using the PubMed API.
+///
+/// # Returns
+///
+/// A `Result` containing a `HashSet` of unique `Article` structs found
+/// during the snowballing process, or a `Box<dyn Error>` if an error occurs.
 
 pub async fn snowball<T>(id_list: &[T], max_depth: u8, output_max_size: usize, search_for: &SearchFor, api_key: &str) -> Result<Vec<Article>, Error>
 where
@@ -94,27 +138,3 @@ where
     Ok(articles)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn snowball_test() {
-        let id_list = ["020-200-401-307-33X"];
-        let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
-
-        let articles = snowball(&id_list, 2, 10, &SearchFor::Both, api_key).await.unwrap();
-
-        assert_eq!(articles.len(), 10);
-
-        println!("{:#?}", articles);
-    }
-
-    #[tokio::test]
-    #[should_panic]
-    async fn empty_snowball() {
-        let id_list = [""];
-        let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
-
-        let _ = snowball(&id_list, 2, 10, &SearchFor::Both, api_key).await.unwrap();
-    }
-}

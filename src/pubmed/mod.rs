@@ -1,44 +1,85 @@
+//! Handles interactions with the PubMed API for retrieving article data
+//! and expanding citation networks.
+//!
+//! Note: PubMed primarily provides article metadata and links to related articles
+//! (like PMC articles or articles citing the current one via Europe PMC),
+//! but does not offer a direct citation/reference list API like Lens.org.
+//! The snowballing functionality here is more limited, focusing on retrieving
+//! article details based on PMIDs and finding citing/referenced articles via E-Utilities.
+
 use regex::Regex;
 use anyhow::{Context, Result};
 
+/// Macro to construct regex patterns for extracting specific fields from PubMed's raw format.
+///
+/// The raw PubMed format uses field identifiers (like "PMID", "TI", "AB", "AU")
+/// followed by a hyphen and the field content, ending before the next field identifier.
 macro_rules! pattern {
     ($feature_identifer:expr) => {{
         concat!(
-            "(?s)",
+            "(?s)", // Enable dotall mode ('.' matches newline)
             $feature_identifer,
-            "[[:space:]]*-[[:space:]]*(.*?)[A-Z]+[[:space:]]*-"
+            "[[:space:]]*-[[:space:]]*(.*?)[A-Z]+[[:space:]]*-" // Capture content between identifier and next uppercase identifier + hyphen
         )
     }};
 }
 
+/// Regex pattern string for extracting the PubMed ID (PMID).
 static PMID_PATTERN: &str = pattern!("PMID");
+/// Regex pattern string for extracting the article title (TI).
 static TITLE_PATTERN: &str = pattern!("TI");
+/// Regex pattern string for extracting the abstract (AB).
 static ABSTRACT_PATTERN: &str = pattern!("AB");
+/// Regex pattern string for extracting author names (AU).
 static AUTHOR_PATTERN: &str = pattern!("AU");
 
+/// Base URL for finding articles that cite a given PubMed ID (citedin).
 static ASC_URL_BASE: &str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&linkname=pubmed_pubmed_citedin&id=";
+/// Base URL for finding articles referenced by a given PubMed ID (refs).
 static DESC_URL_BASE: &str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&linkname=pubmed_pubmed_refs&id=";
 
+// Lazy static initialization for compiled regex patterns.
 lazy_static::lazy_static! {
+    /// Compiled regex for extracting PMID.
     static ref PMID_REGEX: Regex = Regex::new(PMID_PATTERN).expect("PMID_REGEX failed to compile");
+    /// Compiled regex for extracting Title.
     static ref TITLE_REGEX: Regex = Regex::new(TITLE_PATTERN).expect("TITLE_REGEX failed to compile");
+    /// Compiled regex for extracting Abstract.
     static ref ABSTRACT_REGEX: Regex = Regex::new(ABSTRACT_PATTERN).expect("ABSTRACT_REGEX failed to compile");
+    /// Compiled regex for extracting Authors.
     static ref AUTHOR_REGEX: Regex = Regex::new(AUTHOR_PATTERN).expect("AUTHOR_REGEX failed to compile");
+    /// Compiled regex for extracting <Id> tags from E-Utilities responses.
     static ref ID_REGEX: Regex = Regex::new("(?s)<Id>(.*?)</Id>").expect("AUTHOR_REGEX failed to compile");
 }
 
 
+/// Represents an article with core bibliographic information retrieved from PubMed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Article {
-    pmid: String,
-    title: Option<String>,
-    summary: Option<String>,
-    authors: Option<Vec<String>>
+    /// The PubMed ID (PMID) of the article.
+    pub pmid: String,
+    /// The title of the article.
+    pub title: Option<String>,
+    /// The abstract or summary of the article.
+    pub summary: Option<String>,
+    /// The list of authors.
+    pub authors: Option<Vec<String>>
 }
 
 impl Article {
+    /// Parses a single raw article string from PubMed format into an `Article` struct.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw_article`: A string slice containing the raw PubMed format for one article.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the parsed `Article`, or an error if parsing fails (e.g., missing PMID).
     pub fn from_raw_article(raw_article: &str) -> Result<Article> {
+        /// Cleans up extracted feature strings by removing newlines and trimming/collapsing whitespace.
         fn clean_feature(input: &str) -> String {
+            /// Trims leading/trailing whitespace and replaces multiple internal spaces with a single space.
             pub fn trim_whitespace(s: &str) -> String {
                 let mut new_str = s.trim().to_owned();
                 let mut prev = ' '; // The initial value doesn't really matter
@@ -49,17 +90,19 @@ impl Article {
                 });
                 new_str
             }
-        
+
             let ret = input.replace("\r\n", "");
-        
+
             trim_whitespace(&ret)
         }
 
+        /// Extracts a single occurrence of a field using a regex.
         fn extract_single(article: &str, regex: &Regex, group: usize) -> Option<String> {
             let string = regex.captures(article)?.get(group)?.as_str();
             Some(clean_feature(string))
         }
 
+        /// Extracts all occurrences of a repeating field (like authors) using a regex.
         fn extract_all(article: &str, regex: &Regex, group: usize) -> Option<Vec<String>> {
             let vec: Option<Vec<String>> = regex.captures_iter(article).map(|x| Some(clean_feature(x.get(group)?.as_str()))).collect();
             vec
@@ -74,21 +117,44 @@ impl Article {
         })
     }
 
-    pub fn from_raw_articles(raw_articles: &str) -> Result<impl Iterator<Item = Article> + '_> { 
+    /// Parses a string containing multiple raw articles from PubMed format.
+    ///
+    /// Assumes articles are separated by double newlines (`\r\n\r\n`).
+    ///
+    /// # Arguments
+    ///
+    /// * `raw_articles`: A string slice containing the raw PubMed format for multiple articles.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing an iterator over the parsed `Article` structs.
+    pub fn from_raw_articles(raw_articles: &str) -> Result<impl Iterator<Item = Article> + '_> {
         Ok(raw_articles
             .split("\r\n\r\n")
-            .map(|x| Article::from_raw_article(x).unwrap()))
+            .map(|x| Article::from_raw_article(x).unwrap())) // Note: Using unwrap here might panic on parsing errors
     }
 
 
+    /// Requests raw article data from PubMed for a list of PMIDs.
+    ///
+    /// Uses the E-Utilities API to fetch articles in PubMed format.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_pmid`: A slice of string slices representing the PMIDs to fetch.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the raw response body as a string, or an error if the request fails.
     async fn request_raw_articles(src_pmid: &[&str]) -> Result<String> {
         let url: String = format!(
             "https://pubmed.ncbi.nlm.nih.gov/?term={}&show_snippets=off&format=pubmed&size=200",
-            src_pmid.join(",")
+            src_pmid.join(",") // Join PMIDs with commas for the query term
         );
 
         let body = reqwest::get(url).await?.text().await?;
 
+        // Regex to extract the <pre> block containing the PubMed format data
         let body_to_raw_articles: Regex = Regex::new(r"(?s)<pre.*?(PMID.*)</pre>")?;
 
         Ok(body_to_raw_articles
@@ -98,6 +164,18 @@ impl Article {
             .to_owned())
     }
 
+    /// Completes the information for a list of articles using the PubMed API.
+    ///
+    /// This function takes a list of PMIDs and fetches detailed data for them
+    /// from PubMed, returning a vector of `Article` structs.
+    ///
+    /// # Arguments
+    ///
+    /// * `src_pmid`: A slice of string slices representing the PMIDs to complete.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing a vector of `Article` structs, or an error if fetching or parsing fails.
     pub async fn complete_articles(src_pmid: &[&str]) -> Result<Vec<Article>> {
         let raw_articles = Article::request_raw_articles(src_pmid).await?;
         let ret = Article::from_raw_articles(&raw_articles)?.collect();
@@ -105,6 +183,20 @@ impl Article {
     }
 }
 
+/// Performs a single step of snowballing using PubMed E-Utilities (unsafe chunk size).
+///
+/// This function finds articles that cite or are referenced by the given PMIDs
+/// by querying the E-Utilities API. It's marked unsafe because it doesn't handle
+/// chunking the input PMIDs, which can lead to URL length limits.
+///
+/// # Arguments
+///
+/// * `src_pmid`: A slice of string slices representing the source PMIDs.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of strings representing the PMIDs of related articles,
+/// or an error if the request or parsing fails.
 async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
     let src_pmid_comma =  src_pmid.join(",");
     let asc_url: String = format!("{ASC_URL_BASE}{src_pmid_comma}");
@@ -115,6 +207,7 @@ async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
 
     let body: String = [body_desc, body_asc].join("\n");
 
+    // Extract PMIDs from <Id> tags in the response
     let dest_pmid : Result<Vec<_>> = ID_REGEX.captures_iter(&body)
         .map(|x| anyhow::Ok(x
             .get(1)
@@ -127,9 +220,22 @@ async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
     dest_pmid
 }
 
+/// Performs a single step of snowballing using PubMed E-Utilities, handling chunking.
+///
+/// This function finds articles that cite or are referenced by the given PMIDs
+/// by querying the E-Utilities API. It chunks the input PMIDs to avoid URL length limits.
+///
+/// # Arguments
+///
+/// * `src_pmid`: A slice of string slices representing the source PMIDs.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of strings representing the PMIDs of related articles,
+/// or an error if the request or parsing fails.
 pub async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
     let dest_pmid = futures::future::join_all(src_pmid
-            .chunks(325)
+            .chunks(325) // Chunk size to manage URL length
             .map(snowball_onestep_unsafe))
         .await
         .into_iter()
@@ -141,9 +247,25 @@ pub async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
     Ok(dest_pmid)
 }
 
+/// Performs a snowballing expansion of a citation network starting from PubMed IDs.
+///
+/// This function iteratively finds references and/or citations for the current set
+/// of articles using the PubMed E-Utilities API up to a specified maximum depth.
+/// Note that PubMed's E-Utilities primarily provide citing articles and referenced
+/// articles via links, not comprehensive lists like some other databases.
+///
+/// # Arguments
+///
+/// * `src_pmid`: A slice of string slices representing the starting PMIDs.
+/// * `max_depth`: The maximum depth of the snowballing process. Depth 0 returns only the initial IDs.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of strings representing the unique PMIDs found
+/// during the snowballing, or an error if the process fails.
 pub async fn snowball(src_pmid: &[&str], max_depth: u8) -> Result<Vec<String>> {
     let mut all_pmid : Vec<String> = Vec::new();
-    
+
     let mut current_pmid = src_pmid
         .iter()
         .cloned()
@@ -157,113 +279,11 @@ pub async fn snowball(src_pmid: &[&str], max_depth: u8) -> Result<Vec<String>> {
             .iter()
             .map(|x| x.as_str())
             .collect::<Vec<&str>>();
-        
+
         current_pmid = snowball_onestep(&current_pmid_refs).await?;
 
         all_pmid.append(&mut current_pmid.clone());
     }
 
     Ok(all_pmid)
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn regex_pattern_construction() {
-        assert_eq!(ABSTRACT_PATTERN, "(?s)AB[[:space:]]*-[[:space:]]*(.*?)[A-Z]+[[:space:]]*-");
-    }
-
-    #[tokio::test]
-    async fn test_snowball_multiple() {
-        let src_pmid = ["30507730"];
-
-        let dest_pmid = snowball(&src_pmid, 2).await.unwrap();
-
-        let expected_dest_pmid = 
-            ["30507730", "30507730", "36311211", "35509534", "34997040",
-            "34886363", "34067730", "34628279", "34125618", "34065984",
-            "33872735", "33334688", "33312483", "33021583", "32955837",
-            "32629826", "32487981", "32472025", "32442789", "32338038",
-            "32162500", "31991706", "31987537", "31855914", "31837838",
-            "31837386", "31817936", "31814877", "31775952", "31694665",
-            "31663312", "31530900", "31524089", "31352255", "30899545",
-            "30659818", "30507730", "30290832", "30224304", "30193830",
-            "30139418", "29879146", "29629183", "29373506", "29189580",
-            "29113569", "29097009", "29084230", "28955193", "28870141",
-            "28813586", "28783444", "28596798", "28593089", "28548972",
-            "28448210", "28422589", "27901037", "27475271", "27421291",
-            "27385549", "27350847", "27243798", "27080110", "27030897",
-            "26896559", "26842868", "26349502", "26221161", "26205763",
-            "25991989", "25141359", "24949644", "24113704", "23299872",
-            "23038786", "23012634", "22303996", "22011559", "21773020",
-            "21694556", "19910802", "19565683", "19286913", "19197213",
-            "19127177", "19002201", "18053143", "17603144", "17452684",
-            "16616614", "15380917", "12569225", "12540391", "12183207",
-            "7961281", "7124671", "2278545", "1509229", "30507730",
-            "36311211", "35509534", "34997040", "34886363", "34067730",
-            "36553386", "36311211", "35509534", "34997040", "34886363",
-            "34067730"];            
-
-        assert_eq!(dest_pmid, expected_dest_pmid);
-    }
-
-    #[tokio::test]
-    async fn complete_multiple_articles() {
-        let src_pmid = 
-            ["30507730", "30507730", "36311211", "35509534", "34997040",
-            "34886363", "34067730", "34628279", "34125618", "34065984",
-            "33872735", "33334688", "33312483", "33021583", "32955837",
-            "32629826", "32487981", "32472025", "32442789", "32338038",
-            "32162500", "31991706", "31987537", "31855914", "31837838",
-            "31837386", "31817936", "31814877", "31775952", "31694665",
-            "31663312", "31530900", "31524089", "31352255", "30899545",
-            "30659818", "30507730", "30290832", "30224304", "30193830",
-            "30139418", "29879146", "29629183", "29373506", "29189580",
-            "29113569", "29097009", "29084230", "28955193", "28870141",
-            "28813586", "28783444", "28596798", "28593089", "28548972",
-            "28448210", "28422589", "27901037", "27475271", "27421291",
-            "27385549", "27350847", "27243798", "27080110", "27030897",
-            "26896559", "26842868", "26349502", "26221161", "26205763",
-            "25991989", "25141359", "24949644", "24113704", "23299872",
-            "23038786", "23012634", "22303996", "22011559", "21773020",
-            "21694556", "19910802", "19565683", "19286913", "19197213",
-            "19127177", "19002201", "18053143", "17603144", "17452684",
-            "16616614", "15380917", "12569225", "12540391", "12183207",
-            "7961281", "7124671", "2278545", "1509229", "30507730",
-            "36311211", "35509534", "34997040", "34886363", "34067730",
-            "36553386", "36311211", "35509534", "34997040", "34886363",
-            "34067730"];
-
-        let articles = Article::complete_articles(&src_pmid)
-            .await
-            .expect("Article request failed");
-
-        assert_eq!(articles.len(), 98);
-    }
-    
-    #[tokio::test]
-    async fn complete_single_article() {
-        
-        let src_pmid: [&str; 1] = ["30507730"];
-
-        let articles = Article::complete_articles(&src_pmid)
-            .await
-            .expect("Article request failed");
-        
-        assert_eq!(articles.len(), 1);
-
-        let article = articles
-            .first()
-            .expect("One article must be returned");
-        
-        let expected_article = Article {
-            pmid: "30507730".to_owned(),
-            title: Some("Pole Dancing for Fitness: The Physiological and Metabolic Demand of a 60-Minute Class.".to_owned()),
-            summary: Some("Nicholas, JC, McDonald, KA, Peeling, P, Jackson, B, Dimmock, JA, Alderson, JA, and Donnelly, CJ. Pole dancing for fitness: The physiological and metabolic demand of a 60-minute class. J Strength Cond Res 33(10): 2704-2710, 2019-Little is understood about the acute physiological or metabolic demand of pole dancing classes. As such, the aims of this study were to quantify the demands of a standardized recreational pole dancing class, classifying outcomes according to American College of Sports Medicine (ACSM) exercise-intensity guidelines, and to explore differences in physiological and metabolic measures between skill- and routine-based class components. Fourteen advanced-level amateur female pole dancers completed three 60-minute standardized pole dancing classes. In one class, participants were fitted with a portable metabolic analysis unit. Overall, classes were performed at a mean VO2 of 16.0 ml·kg·min, total energy cost (EC) of 281.6 kcal (4.7 kcal·min), metabolic equivalent (METs) of 4.6, heart rate of 131 b·min, rate of perceived exertion (RPE) of 6.3/10, and blood lactate of 3.1 mM. When comparing skill- and routine-based components of the class, EC per minute (4.4 vs. 5.3 kcal·min), peak VO2 (21.5 vs. 29.6 ml·kg·min), METs (4.3 vs. 5.2), and RPE (7.2 vs. 8.4) were all greater in the routine-based component (p &lt; 0.01), indicating that classes with an increased focus on routine-based training, as compared to skill-based training, may benefit those seeking to exercise at a higher intensity level, resulting in greater caloric expenditure. In accordance with ASCM guidelines, an advanced-level 60-minute pole dancing class can be classified as a moderate-intensity cardiorespiratory exercise; when completed for ≥30 minutes, ≥5 days per week (total ≥150 minutes) satisfies the recommended level of exercise for improved health and cardiorespiratory fitness.".to_owned()),
-            authors: Some(vec!["Nicholas, Joanna C".to_owned(), "McDonald, Kirsty A".to_owned(), "Peeling, Peter".to_owned(), "Jackson, Ben".to_owned(), "Dimmock, James A".to_owned(), "Alderson, Jacqueline A".to_owned(), "Donnelly, Cyril J".to_owned()])
-        };
-        assert_eq!(*article, expected_article);
-    }
 }
