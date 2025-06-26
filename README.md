@@ -1,6 +1,4 @@
-# Biblizap-rs
-
-A brief description of the Biblizap-rs project.
+# BibliZap 
 
 ## Description
 
