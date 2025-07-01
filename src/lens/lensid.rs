@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 
 use arrayvec::ArrayString;
-use serde::{Serialize, Deserialize, Deserializer};
 use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 /// Represents errors that can occur when parsing or validating a Lens.org ID string.
@@ -15,7 +15,7 @@ pub enum LensIdError {
     Not19Characters,
     /// The parsed integer value of the LensID is zero, which is considered invalid.
     #[error("LensID is zero")]
-    ZeroLensID
+    ZeroLensID,
 }
 
 /// A custom type representing a validated Lens.org specific ID.
@@ -30,7 +30,6 @@ pub struct LensId {
     string: ArrayString<19>,
 }
 
-
 // Note: The `References` struct here seems misplaced and might belong in `citations.rs`.
 // Keeping it for documentation purposes based on the provided code, but it might need refactoring.
 /// Represents a list of Lens IDs, potentially used for references or citations.
@@ -42,8 +41,8 @@ impl<'de> Deserialize<'de> for LensId {
     ///
     /// Deserializes a string value into a validated `LensId` struct.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         let visitor = LensIdVisitor(PhantomData);
         deserializer.deserialize_str(visitor)
@@ -52,7 +51,7 @@ impl<'de> Deserialize<'de> for LensId {
 
 /// A visitor for deserializing a string into a `LensId`.
 struct LensIdVisitor(PhantomData<fn() -> LensId>);
-impl<'de> Visitor<'de> for LensIdVisitor {
+impl Visitor<'_> for LensIdVisitor {
     type Value = LensId;
 
     /// Indicates the expected format for deserialization.
@@ -86,7 +85,7 @@ impl TryFrom<&str> for LensId {
 
         match lensid.int {
             0 => Err(LensIdError::ZeroLensID),
-            _ => Ok(lensid)
+            _ => Ok(lensid),
         }
     }
 }
@@ -122,7 +121,7 @@ impl LensId {
 
         LensId {
             string: ArrayString::from(lensid_str).unwrap(), // Safe because length is checked by caller
-            int: lensid_int
+            int: lensid_int,
         }
     }
 }
