@@ -16,13 +16,19 @@ use super::error::LensError;
 /// # Returns
 ///
 /// A `Result` containing the `reqwest::Response` if successful, or a `LensError` if an error occurs.
-pub async fn request_response(client: &reqwest::Client,
+pub async fn request_response(
+    client: &reqwest::Client,
     api_key: &str,
     id_list: impl IntoIterator<Item = impl serde::Serialize> + serde::Serialize,
     id_type: &str,
-    include: &[&str]) -> Result<reqwest::Response, LensError>
-{
-    request_response_with_body(client, api_key, &make_request_body(id_list, id_type, include)).await
+    include: &[&str],
+) -> Result<reqwest::Response, LensError> {
+    request_response_with_body(
+        client,
+        api_key,
+        &make_request_body(id_list, id_type, include),
+    )
+    .await
 }
 
 /// Sends a POST request with a pre-built JSON body to the Lens.org API.
@@ -41,7 +47,11 @@ pub async fn request_response(client: &reqwest::Client,
 ///
 /// A `Result` containing the `reqwest::Response` if successful (status 200),
 /// or a `LensError` if an error occurs (e.g., HTTP error, missing rate limit header, parse error).
-async fn request_response_with_body(client: &reqwest::Client, api_key: &str, body: &str) -> Result<reqwest::Response, LensError> {
+async fn request_response_with_body(
+    client: &reqwest::Client,
+    api_key: &str,
+    body: &str,
+) -> Result<reqwest::Response, LensError> {
     let base_url: &str = "https://api.lens.org/scholarly/search";
 
     loop {
@@ -56,12 +66,13 @@ async fn request_response_with_body(client: &reqwest::Client, api_key: &str, bod
         if response.status() == 200 {
             return Ok(response);
         } else {
-            println!("{:?}", response.headers());
-            let seconds_to_wait = response.headers()
-            .get("x-rate-limit-retry-after-seconds")
-            .ok_or(LensError::RateLimitMissing)?
-            .to_str()?
-            .parse::<u64>()?;
+            log::debug!("{:?}", response.headers());
+            let seconds_to_wait = response
+                .headers()
+                .get("x-rate-limit-retry-after-seconds")
+                .ok_or(LensError::RateLimitMissing)?
+                .to_str()?
+                .parse::<u64>()?;
 
             async_std::task::sleep(std::time::Duration::from_secs(seconds_to_wait)).await;
         }
@@ -83,9 +94,11 @@ async fn request_response_with_body(client: &reqwest::Client, api_key: &str, bod
 /// # Returns
 ///
 /// A `String` containing the JSON request body.
-fn make_request_body(id_list: impl IntoIterator<Item = impl serde::Serialize> + serde::Serialize,
-                    id_type: &str,
-                    include: &[&str]) -> String {
+fn make_request_body(
+    id_list: impl IntoIterator<Item = impl serde::Serialize> + serde::Serialize,
+    id_type: &str,
+    include: &[&str],
+) -> String {
     serde_json::json!(
     {
         "query": {
@@ -95,5 +108,6 @@ fn make_request_body(id_list: impl IntoIterator<Item = impl serde::Serialize> + 
     },
         "include": include,
         "size": id_list.into_iter().count()
-    }).to_string()
+    })
+    .to_string()
 }
