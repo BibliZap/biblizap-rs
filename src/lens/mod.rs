@@ -32,34 +32,41 @@ impl<'a> TypedIdList<'a> {
     /// # Returns
     ///
     /// A `TypedIdList` containing the categorized IDs.
-    pub fn from_raw_id_list<I>(id_list: I) -> TypedIdList<'a>
+    pub fn from_raw_id_list<I>(id_list: I) -> Result<Self, LensError>
     where
         I: IntoIterator<Item = &'a str> + Clone,
     {
         use regex::Regex;
         // Regex for matching PMIDs (digits only)
-        let pmid_regex = Regex::new("^[0-9]+$").unwrap();
+        let pmid_regex = Regex::new("^[0-9]+$").expect("Failed to create PMID regex");
         // Regex for matching Lens IDs (format like XXX-XXX-...)
-        let lens_id_regex = Regex::new("^...-...-...-...-...$").unwrap();
+        let lens_id_regex =
+            Regex::new("^...-...-...-...-...$").expect("Failed to create Lens ID regex");
         // Regex for matching DOIs (starts with 10.)
-        let doi_regex = Regex::new("^10\\.").unwrap();
+        let doi_regex = Regex::new("^10\\.").expect("Failed to create DOI regex");
 
-        TypedIdList {
-            pmid: id_list
-                .clone()
-                .into_iter()
-                .filter(|n| pmid_regex.is_match(n))
-                .collect::<Vec<_>>(),
-            lens_id: id_list
-                .clone()
-                .into_iter()
-                .filter(|n| lens_id_regex.is_match(n))
-                .collect::<Vec<_>>(),
-            doi: id_list
-                .into_iter()
-                .filter(|n| doi_regex.is_match(n))
-                .collect::<Vec<&str>>(),
+        let pmid = id_list
+            .clone()
+            .into_iter()
+            .filter(|n| pmid_regex.is_match(n))
+            .collect::<Vec<_>>();
+
+        let lens_id = id_list
+            .clone()
+            .into_iter()
+            .filter(|n| lens_id_regex.is_match(n))
+            .collect::<Vec<_>>();
+
+        let doi = id_list
+            .into_iter()
+            .filter(|n| doi_regex.is_match(n))
+            .collect::<Vec<&str>>();
+
+        if pmid.is_empty() && lens_id.is_empty() && doi.is_empty() {
+            return Err(LensError::NoValidIdsInInputList);
         }
+
+        Ok(Self { pmid, lens_id, doi })
     }
 }
 
@@ -129,7 +136,7 @@ where
     };
     let iter = id_list.iter().map(|item| item.as_ref());
 
-    let typed_id_list = TypedIdList::from_raw_id_list(iter.clone());
+    let typed_id_list = TypedIdList::from_raw_id_list(iter.clone())?;
 
     let mut complete_articles = Vec::<Article>::with_capacity(iter.len());
 
@@ -255,7 +262,7 @@ where
 {
     let iter = id_list.iter().map(|item| item.as_ref());
 
-    let typed_id_list = TypedIdList::from_raw_id_list(iter.clone());
+    let typed_id_list = TypedIdList::from_raw_id_list(iter.clone())?;
     let mut references_and_citations = Vec::<LensId>::with_capacity(iter.into_iter().count());
 
     let client = match client {
@@ -366,6 +373,7 @@ pub async fn snowball<T>(
 where
     T: AsRef<str>,
 {
+    // This is done to avoid excessive memory allocation for deep snowballing
     let mut all_lensid: Vec<LensId> = Vec::with_capacity(probable_output_size(max_depth));
 
     // Start with the direct references/citations of the source IDs
@@ -436,6 +444,22 @@ mod tests {
         }
     }
 
+    /// Tests the `snowball` function with invalid IDs to ensure proper error handling.
+    #[tokio::test]
+    async fn snowball_fail() {
+        let id_list = ["I AM AN INVALID ID", "I AM AN INVALID ID TOO"];
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
+        let client = reqwest::Client::new();
+        let error = snowball(&id_list, 2, &SearchFor::Both, &api_key, Some(&client))
+            .await
+            .unwrap_err();
+
+        match error {
+            LensError::NoValidIdsInInputList => (),
+            _ => panic!("Expected NoValidIdsInInputList error"),
+        }
+    }
+
     /// Tests the `snowball` function by expanding a network from seed IDs.
     #[tokio::test]
     async fn snowball_test() {
@@ -445,7 +469,6 @@ mod tests {
             "30507730",
             "10.1016/j.nephro.2007.05.005",
         ];
-        // NOTE: Replace with a valid API key for actual testing
         let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
         let client = reqwest::Client::new();
         let new_id = snowball(&id_list, 2, &SearchFor::Both, &api_key, Some(&client))

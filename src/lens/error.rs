@@ -3,6 +3,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum LensError {
+    #[error("no valid ids in input list")]
+    NoValidIdsInInputList,
     #[error(transparent)]
     Request(#[from] reqwest::Error),
     #[error(transparent)]
