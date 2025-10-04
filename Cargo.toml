@@ -19,3 +19,6 @@ serde = { version = "1.0.188", features = ["serde_derive"] }
 serde_json = "1.0.107"
 thiserror = "1.0.48"
 tokio = { version = "1.32.0", features = ["rt", "full"] }
+
+[dev-dependencies]
+dotenvy = "0.15.7"

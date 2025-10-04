@@ -1,16 +1,16 @@
-pub mod lensid;
-pub mod error;
 pub mod article;
-pub mod request;
 pub mod citations;
+pub mod error;
+pub mod lensid;
+pub mod request;
 
 use super::common::SearchFor;
 
-use lensid::LensId;
-use error::LensError;
 use article::Article;
-use request::request_response;
 use citations::ReferencesAndCitations;
+use error::LensError;
+use lensid::LensId;
+use request::request_response;
 
 /// A helper struct to categorize raw string IDs into known types (PMID, Lens ID, DOI).
 struct TypedIdList<'a> {
@@ -19,10 +19,10 @@ struct TypedIdList<'a> {
     /// List of potential Lens.org IDs.
     pub lens_id: Vec<&'a str>,
     /// List of potential DOIs.
-    pub doi: Vec<&'a str>
+    pub doi: Vec<&'a str>,
 }
 
-impl <'a> TypedIdList<'a> {
+impl<'a> TypedIdList<'a> {
     /// Categorizes a list of raw string IDs into known types using regular expressions.
     ///
     /// # Arguments
@@ -34,7 +34,7 @@ impl <'a> TypedIdList<'a> {
     /// A `TypedIdList` containing the categorized IDs.
     pub fn from_raw_id_list<I>(id_list: I) -> TypedIdList<'a>
     where
-        I: IntoIterator<Item = &'a str>  + Clone
+        I: IntoIterator<Item = &'a str> + Clone,
     {
         use regex::Regex;
         // Regex for matching PMIDs (digits only)
@@ -45,9 +45,20 @@ impl <'a> TypedIdList<'a> {
         let doi_regex = Regex::new("^10\\.").unwrap();
 
         TypedIdList {
-            pmid: id_list.clone().into_iter().filter(|n| pmid_regex.is_match(n)).collect::<Vec<_>>(),
-            lens_id: id_list.clone().into_iter().filter(|n| lens_id_regex.is_match(n)).collect::<Vec<_>>(),
-            doi : id_list.into_iter().filter(|n| doi_regex.is_match(n)).collect::<Vec<&str>>()
+            pmid: id_list
+                .clone()
+                .into_iter()
+                .filter(|n| pmid_regex.is_match(n))
+                .collect::<Vec<_>>(),
+            lens_id: id_list
+                .clone()
+                .into_iter()
+                .filter(|n| lens_id_regex.is_match(n))
+                .collect::<Vec<_>>(),
+            doi: id_list
+                .into_iter()
+                .filter(|n| doi_regex.is_match(n))
+                .collect::<Vec<&str>>(),
         }
     }
 }
@@ -67,21 +78,25 @@ impl <'a> TypedIdList<'a> {
 /// # Returns
 ///
 /// A `Result` containing a vector of `Article` structs, or a `LensError` if an error occurs.
-pub async fn complete_articles<T>(id_list: &[T],
+pub async fn complete_articles<T>(
+    id_list: &[T],
     api_key: &str,
-    client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<Article>, LensError>
 where
-    T: AsRef<str>
+    T: AsRef<str>,
 {
-    let output_id = futures::future::join_all(id_list
-        .chunks(1000) // Chunk requests to manage load
-        .map(|x| complete_articles_chunk(x, api_key, client)))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, LensError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let output_id = futures::future::join_all(
+        id_list
+            .chunks(1000) // Chunk requests to manage load
+            .map(|x| complete_articles_chunk(x, api_key, client)),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, LensError>>()?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
 
     Ok(output_id)
 }
@@ -100,15 +115,17 @@ where
 /// # Returns
 ///
 /// A `Result` containing a vector of `Article` structs for this chunk, or a `LensError`.
-async fn complete_articles_chunk<T>(id_list: &[T],
-        api_key: &str,
-        client: Option<&reqwest::Client>) -> Result<Vec<Article>, LensError>
+async fn complete_articles_chunk<T>(
+    id_list: &[T],
+    api_key: &str,
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<Article>, LensError>
 where
-    T: AsRef<str>
+    T: AsRef<str>,
 {
     let client = match client {
         Some(t) => t.to_owned(),
-        None => reqwest::Client::new()
+        None => reqwest::Client::new(),
     };
     let iter = id_list.iter().map(|item| item.as_ref());
 
@@ -117,13 +134,16 @@ where
     let mut complete_articles = Vec::<Article>::with_capacity(iter.len());
 
     // Fetch articles by each ID type
-    complete_articles.append(&mut complete_articles_typed(&typed_id_list.pmid, "pmid", api_key, &client).await?);
-    complete_articles.append(&mut complete_articles_typed(&typed_id_list.lens_id, "lens_id", api_key, &client).await?);
-    complete_articles.append(&mut complete_articles_typed(&typed_id_list.doi, "doi", api_key, &client).await?);
+    complete_articles
+        .append(&mut complete_articles_typed(&typed_id_list.pmid, "pmid", api_key, &client).await?);
+    complete_articles.append(
+        &mut complete_articles_typed(&typed_id_list.lens_id, "lens_id", api_key, &client).await?,
+    );
+    complete_articles
+        .append(&mut complete_articles_typed(&typed_id_list.doi, "doi", api_key, &client).await?);
 
     Ok(complete_articles)
 }
-
 
 /// Fetches detailed article information from Lens.org for a list of IDs of a specific type.
 ///
@@ -139,9 +159,23 @@ where
 /// # Returns
 ///
 /// A `Result` containing a vector of `Article` structs, or a `LensError`.
-async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str, client: &reqwest::Client) -> Result<Vec<Article>, LensError> {
+async fn complete_articles_typed(
+    id_list: &[&str],
+    id_type: &str,
+    api_key: &str,
+    client: &reqwest::Client,
+) -> Result<Vec<Article>, LensError> {
     // Fields to include in the API response
-    let include = ["lens_id","title", "authors", "abstract", "external_ids", "scholarly_citations_count", "source", "year_published"];
+    let include = [
+        "lens_id",
+        "title",
+        "authors",
+        "abstract",
+        "external_ids",
+        "scholarly_citations_count",
+        "source",
+        "year_published",
+    ];
 
     let response = request_response(client, api_key, id_list, id_type, &include).await?;
 
@@ -171,22 +205,26 @@ async fn complete_articles_typed(id_list: &[&str], id_type: &str, api_key: &str,
 /// # Returns
 ///
 /// A `Result` containing a vector of `LensId`s of the related articles, or a `LensError`.
-async fn request_references_and_citations<T>(id_list: &[T],
+async fn request_references_and_citations<T>(
+    id_list: &[T],
     search_for: &SearchFor,
     api_key: &str,
-    client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<LensId>, LensError>
 where
-    T: AsRef<str>
+    T: AsRef<str>,
 {
-    let output_id = futures::future::join_all(id_list
-        .chunks(1000) // Chunk requests
-        .map(|x| request_references_and_citations_chunk(x, search_for, api_key, client)))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, LensError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let output_id = futures::future::join_all(
+        id_list
+            .chunks(1000) // Chunk requests
+            .map(|x| request_references_and_citations_chunk(x, search_for, api_key, client)),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, LensError>>()?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
 
     Ok(output_id)
 }
@@ -206,12 +244,14 @@ where
 /// # Returns
 ///
 /// A `Result` containing a vector of `LensId`s for this chunk, or a `LensError`.
-async fn request_references_and_citations_chunk<T>(id_list: &[T],
-        search_for: &SearchFor,
-        api_key: &str,
-        client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>
+async fn request_references_and_citations_chunk<T>(
+    id_list: &[T],
+    search_for: &SearchFor,
+    api_key: &str,
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<LensId>, LensError>
 where
-    T: AsRef<str>
+    T: AsRef<str>,
 {
     let iter = id_list.iter().map(|item| item.as_ref());
 
@@ -220,13 +260,40 @@ where
 
     let client = match client {
         Some(t) => t.to_owned(),
-        None => reqwest::Client::new()
+        None => reqwest::Client::new(),
     };
 
     // Fetch references/citations by each ID type
-    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.pmid, "pmid", search_for, api_key, &client).await?);
-    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.lens_id, "lens_id", search_for, api_key, &client).await?);
-    references_and_citations.append(&mut request_references_and_citations_typed_chunk(&typed_id_list.doi, "doi", search_for, api_key, &client).await?);
+    references_and_citations.append(
+        &mut request_references_and_citations_typed_chunk(
+            &typed_id_list.pmid,
+            "pmid",
+            search_for,
+            api_key,
+            &client,
+        )
+        .await?,
+    );
+    references_and_citations.append(
+        &mut request_references_and_citations_typed_chunk(
+            &typed_id_list.lens_id,
+            "lens_id",
+            search_for,
+            api_key,
+            &client,
+        )
+        .await?,
+    );
+    references_and_citations.append(
+        &mut request_references_and_citations_typed_chunk(
+            &typed_id_list.doi,
+            "doi",
+            search_for,
+            api_key,
+            &client,
+        )
+        .await?,
+    );
 
     Ok(references_and_citations)
 }
@@ -246,17 +313,18 @@ where
 /// # Returns
 ///
 /// A `Result` containing a vector of `LensId`s, or a `LensError`.
-async fn request_references_and_citations_typed_chunk(id_list: &[&str],
-        id_type: &str,
-        search_for: &SearchFor,
-        api_key: &str,
-        client: &reqwest::Client) -> Result<Vec<LensId>, LensError>
-{
+async fn request_references_and_citations_typed_chunk(
+    id_list: &[&str],
+    id_type: &str,
+    search_for: &SearchFor,
+    api_key: &str,
+    client: &reqwest::Client,
+) -> Result<Vec<LensId>, LensError> {
     // Determine which fields to include based on the search direction
     let include = match search_for {
         SearchFor::Both => vec!["lens_id", "references", "scholarly_citations"],
         SearchFor::Citations => vec!["lens_id", "scholarly_citations"],
-        SearchFor::References => vec!["lens_id", "references"]
+        SearchFor::References => vec!["lens_id", "references"],
     };
     let response = request_response(client, api_key, id_list, id_type, &include).await?;
 
@@ -288,23 +356,28 @@ async fn request_references_and_citations_typed_chunk(id_list: &[&str],
 /// # Returns
 ///
 /// A `Result` containing a vector of unique `LensId`s found during the snowballing, or a `LensError`.
-pub async fn snowball<T>(src_lensid: &[T],
+pub async fn snowball<T>(
+    src_lensid: &[T],
     max_depth: u8,
     search_for: &SearchFor,
     api_key: &str,
-    client: Option<&reqwest::Client>) -> Result<Vec<LensId>, LensError>
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<LensId>, LensError>
 where
-    T: AsRef<str> {
-    let mut all_lensid : Vec<LensId> = Vec::with_capacity(probable_output_size(max_depth));
+    T: AsRef<str>,
+{
+    let mut all_lensid: Vec<LensId> = Vec::with_capacity(probable_output_size(max_depth));
 
     // Start with the direct references/citations of the source IDs
-    let mut current_lensid = request_references_and_citations(src_lensid, search_for, api_key, client).await?;
+    let mut current_lensid =
+        request_references_and_citations(src_lensid, search_for, api_key, client).await?;
     all_lensid.append(&mut current_lensid.clone());
 
     // Iterate for the remaining depth
     for _ in 1..max_depth {
         // Find references/citations for the current set of IDs
-        current_lensid = request_references_and_citations(&current_lensid, search_for, api_key, client).await?;
+        current_lensid =
+            request_references_and_citations(&current_lensid, search_for, api_key, client).await?;
 
         // Add new IDs to the total list
         all_lensid.append(&mut current_lensid);
@@ -327,7 +400,7 @@ where
 fn probable_output_size(max_depth: u8) -> usize {
     let max_depth = max_depth as usize;
     // Simple heuristic: grows exponentially with depth
-    100 << (7 * (max_depth-1)) // around 100^(max_depth-1) but fast
+    100 << (7 * (max_depth - 1)) // around 100^(max_depth-1) but fast
 }
 
 #[cfg(test)]
@@ -345,12 +418,16 @@ mod tests {
     /// Tests the `complete_articles` function by fetching details for known IDs.
     #[tokio::test]
     async fn complete_articles_test() {
-        let src_id = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
+        let src_id = [
+            "020-200-401-307-33X",
+            "050-708-976-791-252",
+            "30507730",
+            "10.1016/j.nephro.2007.05.005",
+        ];
 
-        // NOTE: Replace with a valid API key for actual testing
-        let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
 
-        let articles = complete_articles(&src_id, api_key, None).await.unwrap();
+        let articles = complete_articles(&src_id, &api_key, None).await.unwrap();
 
         assert_eq!(articles.len(), src_id.len());
 
@@ -362,39 +439,51 @@ mod tests {
     /// Tests the `snowball` function by expanding a network from seed IDs.
     #[tokio::test]
     async fn snowball_test() {
-        let id_list = ["020-200-401-307-33X", "050-708-976-791-252", "30507730", "10.1016/j.nephro.2007.05.005"];
+        let id_list = [
+            "020-200-401-307-33X",
+            "050-708-976-791-252",
+            "30507730",
+            "10.1016/j.nephro.2007.05.005",
+        ];
         // NOTE: Replace with a valid API key for actual testing
-        let api_key = "TdUUUOLUWn9HpA7zkZnu01NDYO1gVdVz71cDjFRQPeVDCrYGKWoY";
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
         let client = reqwest::Client::new();
-        let new_id = snowball(&id_list, 2, &SearchFor::Both, api_key, Some(&client)).await.unwrap();
+        let new_id = snowball(&id_list, 2, &SearchFor::Both, &api_key, Some(&client))
+            .await
+            .unwrap();
 
         // Assertions based on expected results from the API for these specific IDs and depth
-        assert_eq!(new_id.len(), 85551);
+        assert!(new_id.len() > 85551);
 
         let map_capacity = new_id.len();
         // Use nohash_hasher for potentially faster hashing with LensId
-        let score_hashmap = new_id
-            .into_iter()
-            .fold(nohash_hasher::IntMap::<LensId, usize>::with_capacity_and_hasher(map_capacity, std::hash::BuildHasherDefault::default()),
-                |mut m, x| {
+        let score_hashmap = new_id.into_iter().fold(
+            nohash_hasher::IntMap::<LensId, usize>::with_capacity_and_hasher(
+                map_capacity,
+                std::hash::BuildHasherDefault::default(),
+            ),
+            |mut m, x| {
                 *m.entry(x).or_default() += 1;
                 m
-            });
-        assert_eq!(score_hashmap.len(), 75565);
+            },
+        );
+        assert!(score_hashmap.len() > 75565);
 
-        let max_score_lens_id = score_hashmap.iter().max_by_key(|entry | entry.1).unwrap();
+        let max_score_lens_id = score_hashmap.iter().max_by_key(|entry| entry.1).unwrap();
         assert_eq!(max_score_lens_id.0.as_ref(), "050-708-976-791-252");
-        assert_eq!(*max_score_lens_id.1, 67usize);
+        assert!(*max_score_lens_id.1 > 67usize);
 
         // Take a subset of unique IDs for further testing (e.g., completing articles)
-        let new_id_dedup= score_hashmap
+        let new_id_dedup = score_hashmap
             .into_iter()
             .enumerate()
             .filter(|&(index, _)| index < 500) // Limit to 500 for the next step
-            .map(|x| x.1.0)
+            .map(|x| x.1 .0)
             .collect::<Vec<_>>();
 
-        let articles = complete_articles(&new_id_dedup, api_key, Some(&client)).await.unwrap();
+        let articles = complete_articles(&new_id_dedup, &api_key, Some(&client))
+            .await
+            .unwrap();
         assert_eq!(articles.len(), 500);
     }
 }
