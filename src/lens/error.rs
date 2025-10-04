@@ -1,5 +1,5 @@
-use thiserror::Error;
 use reqwest::header::ToStrError;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum LensError {
@@ -7,8 +7,8 @@ pub enum LensError {
     Request(#[from] reqwest::Error),
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
-    #[error("rate limit missing")]
-    RateLimitMissing,
+    #[error("unexpected response status: {0}")]
+    Not200(String),
     #[error(transparent)]
     RequestToStr(#[from] ToStrError),
     #[error(transparent)]

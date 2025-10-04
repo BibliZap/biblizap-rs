@@ -66,13 +66,18 @@ async fn request_response_with_body(
         if response.status() == 200 {
             return Ok(response);
         } else {
-            log::debug!("{:?}", response.headers());
             let seconds_to_wait = response
                 .headers()
                 .get("x-rate-limit-retry-after-seconds")
-                .ok_or(LensError::RateLimitMissing)?
+                .ok_or(LensError::Not200(format!(
+                    "Status {}: {:#?}",
+                    response.status(),
+                    response.headers()
+                )))?
                 .to_str()?
                 .parse::<u64>()?;
+
+            log::debug!("Told to wait for {} seconds", seconds_to_wait);
 
             async_std::task::sleep(std::time::Duration::from_secs(seconds_to_wait)).await;
         }
