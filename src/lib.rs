@@ -14,9 +14,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("lens error")]
+    #[error(transparent)]
     LensError(#[from] lens::error::LensError),
-    #[error("empty snowball")]
+    #[error("Snowball is empty")]
     EmptySnowball,
 }
 
