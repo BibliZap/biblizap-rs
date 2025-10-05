@@ -9,7 +9,7 @@ pub enum LensError {
     Request(#[from] reqwest::Error),
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
-    #[error("unexpected response status: {0}")]
+    #[error("{0}")]
     LensApi(LensApiErrorInfo),
     #[error(transparent)]
     RequestToStr(#[from] ToStrError),
@@ -27,7 +27,7 @@ pub struct LensApiErrorInfo {
 // Shown to users
 impl std::fmt::Display for LensApiErrorInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Lens Api replied with status {}", self.status_code)
+        write!(f, "Lens Api replied with status {}, please ask your administrator if his api key is valid", self.status_code)
     }
 }
 
