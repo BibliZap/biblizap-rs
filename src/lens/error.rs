@@ -24,14 +24,20 @@ pub struct LensApiErrorInfo {
     pub message: String,
 }
 
+// Shown to users
 impl std::fmt::Display for LensApiErrorInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Status {}: {}", self.status_code, self.message)
+        write!(f, "Lens Api replied with status {}", self.status_code)
     }
 }
 
+// Shown in server logs
 impl std::fmt::Debug for LensApiErrorInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Status {}: {}", self.status_code, self.message)
+        write!(
+            f,
+            "Lens Api replied with status {}: {}",
+            self.status_code, self.message
+        )
     }
 }
