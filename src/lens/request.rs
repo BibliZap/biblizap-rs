@@ -1,6 +1,6 @@
 use crate::lens::error::LensApiErrorInfo;
 
-use super::error::LensError;
+use super::error::*;
 
 /// Makes a POST request to the Lens.org API's scholarly search endpoint.
 ///
@@ -68,21 +68,35 @@ async fn request_response_with_body(
         if response.status() == 200 {
             return Ok(response);
         } else {
-            let seconds_to_wait = response
+            let header_value = response
                 .headers()
                 .get("x-rate-limit-retry-after-seconds")
                 .ok_or(LensError::LensApi(LensApiErrorInfo {
                     status_code: response.status().as_u16(),
                     message: format!("{:#?}", response.headers()),
-                }))?
-                .to_str()?
-                .parse::<u64>()?;
+                }))?;
+
+            let seconds_to_wait = seconds_to_wait_from_response(header_value)?;
 
             log::debug!("Told to wait for {} seconds", seconds_to_wait);
 
             async_std::task::sleep(std::time::Duration::from_secs(seconds_to_wait)).await;
         }
     }
+}
+
+/// Extracts the number of seconds to wait from the `x-rate-limit-retry-after-seconds` header.
+///
+/// This function converts the header value to a string and then parses it as a `u64`.
+///# Arguments
+/// * `header_value`: The header value to extract the wait time from.
+///# Returns
+/// A `Result` containing the number of seconds to wait if successful,
+/// or a `RateLimitExtractionError` if an error occurs (e.g., conversion or parsing error).
+fn seconds_to_wait_from_response(
+    header_value: &reqwest::header::HeaderValue,
+) -> Result<u64, RateLimitExtractionError> {
+    Ok(header_value.to_str()?.parse::<u64>()?)
 }
 
 /// Constructs the JSON request body for a Lens.org scholarly search API request.

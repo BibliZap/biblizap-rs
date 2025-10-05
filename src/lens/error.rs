@@ -3,20 +3,24 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum LensError {
-    #[error("no valid ids in input list")]
+    #[error("All provided ids are invalid")]
     NoValidIdsInInputList,
-    #[error(transparent)]
+    #[error("Lens API is unresponsive")]
     Request(#[from] reqwest::Error),
-    #[error(transparent)]
-    ParseInt(#[from] std::num::ParseIntError),
+    #[error("Failed to extract rate limit information")]
+    RateLimitExtraction(#[from] RateLimitExtractionError),
     #[error("{0}")]
     LensApi(LensApiErrorInfo),
+    #[error("Failed to parse JSON response from Lens API : {0}")]
+    SerdeJson(#[from] serde_json::Error),
+}
+
+#[derive(Error, Debug)]
+pub enum RateLimitExtractionError {
     #[error(transparent)]
     RequestToStr(#[from] ToStrError),
     #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
-    #[error("value as_str error")]
-    ValueAsStr,
+    ParseError(#[from] std::num::ParseIntError),
 }
 
 pub struct LensApiErrorInfo {
@@ -27,7 +31,7 @@ pub struct LensApiErrorInfo {
 // Shown to users
 impl std::fmt::Display for LensApiErrorInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Lens Api replied with status {}, please ask your administrator if his api key is valid", self.status_code)
+        write!(f, "Lens API replied with status {}, please ask your administrator if his API key is valid", self.status_code)
     }
 }
 
