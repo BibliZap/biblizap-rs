@@ -233,6 +233,10 @@ where
     .flatten()
     .collect::<Vec<_>>();
 
+    if output_id.is_empty() {
+        return Err(LensError::NoArticlesFound);
+    }
+
     Ok(output_id)
 }
 
@@ -446,7 +450,7 @@ mod tests {
 
     /// Tests the `snowball` function with invalid IDs to ensure proper error handling.
     #[tokio::test]
-    async fn snowball_fail() {
+    async fn snowball_fail_invalid_ids() {
         let id_list = ["I AM AN INVALID ID", "I AM AN INVALID ID TOO"];
         let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
         let client = reqwest::Client::new();
@@ -457,6 +461,22 @@ mod tests {
         match error {
             LensError::NoValidIdsInInputList => (),
             _ => panic!("Expected NoValidIdsInInputList error"),
+        }
+    }
+
+    /// Tests the `snowball` function with invalid IDs to ensure proper error handling.
+    #[tokio::test]
+    async fn snowball_fail_valid_but_nonexistent() {
+        let id_list = ["10.9999/invalid.doi"];
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
+        let client = reqwest::Client::new();
+        let error = snowball(&id_list, 2, &SearchFor::Both, &api_key, Some(&client))
+            .await
+            .unwrap_err();
+
+        match error {
+            LensError::NoArticlesFound => (),
+            _ => panic!("Expected NoArticlesFound error"),
         }
     }
 

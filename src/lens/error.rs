@@ -3,7 +3,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum LensError {
-    #[error("All provided ids are invalid")]
+    #[error("All provided IDs are invalid")]
     NoValidIdsInInputList,
     #[error("Lens API is unresponsive")]
     Request(#[from] reqwest::Error),
@@ -13,6 +13,8 @@ pub enum LensError {
     LensApi(LensApiErrorInfo),
     #[error("Failed to parse JSON response from Lens API : {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("No articles found for the given query, please check if your input IDs exist")]
+    NoArticlesFound,
 }
 
 #[derive(Error, Debug)]

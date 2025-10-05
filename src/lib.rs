@@ -16,8 +16,6 @@ use thiserror::Error;
 pub enum Error {
     #[error(transparent)]
     LensError(#[from] lens::error::LensError),
-    #[error("Snowball is empty")]
-    EmptySnowball,
 }
 
 /// Represents an article with core bibliographic information.
@@ -82,9 +80,6 @@ pub async fn snowball<T>(
 where
     T: AsRef<str>,
 {
-    if id_list.is_empty() || id_list.first().unwrap().as_ref() == "" {
-        return Err(Error::EmptySnowball);
-    }
     let client = reqwest::Client::new();
     let snowball_id =
         lens::snowball(id_list, max_depth, search_for, api_key, Some(&client)).await?;
