@@ -1,3 +1,5 @@
+use crate::lens::error::LensApiErrorInfo;
+
 use super::error::LensError;
 
 /// Makes a POST request to the Lens.org API's scholarly search endpoint.
@@ -69,11 +71,10 @@ async fn request_response_with_body(
             let seconds_to_wait = response
                 .headers()
                 .get("x-rate-limit-retry-after-seconds")
-                .ok_or(LensError::Not200(format!(
-                    "Status {}: {:#?}",
-                    response.status(),
-                    response.headers()
-                )))?
+                .ok_or(LensError::LensApi(LensApiErrorInfo {
+                    status_code: response.status().as_u16(),
+                    message: format!("{:#?}", response.headers()),
+                }))?
                 .to_str()?
                 .parse::<u64>()?;
 
