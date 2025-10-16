@@ -529,4 +529,25 @@ mod tests {
             .unwrap();
         assert_eq!(articles.len(), 500);
     }
+
+    #[tokio::test]
+    async fn depth1_snowball() {
+        let id_list = ["10.1111/j.1468-0262.2006.00668.x"];
+
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
+        let client = reqwest::Client::new();
+        let direct_citations =
+            snowball(&id_list, 1, &SearchFor::Citations, &api_key, Some(&client))
+                .await
+                .unwrap();
+
+        assert!(direct_citations.len() >= 991);
+
+        let direct_references =
+            snowball(&id_list, 1, &SearchFor::References, &api_key, Some(&client))
+                .await
+                .unwrap();
+
+        assert!(direct_references.len() >= 76);
+    }
 }
