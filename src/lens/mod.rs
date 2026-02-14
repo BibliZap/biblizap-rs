@@ -1,5 +1,6 @@
 pub mod article;
 pub mod citations;
+pub mod counter;
 pub mod error;
 pub mod lensid;
 pub mod request;
@@ -7,7 +8,8 @@ pub mod request;
 use super::common::SearchFor;
 
 use article::Article;
-use citations::ReferencesAndCitations;
+use citations::{ArticleWithReferencesAndCitations, ReferencesAndCitations};
+use counter::LensIdCounter;
 use error::LensError;
 use lensid::LensId;
 use request::request_response;
@@ -351,6 +353,102 @@ async fn request_references_and_citations_typed_chunk(
     Ok(ret)
 }
 
+/// Helper struct to preserve parent-child relationship when querying citations.
+#[derive(Debug)]
+struct ParentWithChildren {
+    parent_id: LensId,
+    children: Vec<LensId>,
+}
+
+/// Requests references and/or citations while preserving parent-child relationships.
+///
+/// Unlike `request_references_and_citations`, this function returns a mapping
+/// of each parent ID to its children, which is necessary for proper count multiplication
+/// in the optimized snowball algorithm.
+///
+/// **Important**: This function respects the Lens API limit of 1000 articles per request
+/// by chunking the input into batches.
+///
+/// # Arguments
+///
+/// * `id_list`: A slice of items that can be referenced as LensIds.
+/// * `search_for`: Specifies whether to search for references, citations, or both.
+/// * `api_key`: The API key for Lens.org.
+/// * `client`: An optional `reqwest::Client` to use for requests.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of `ParentWithChildren` structs, or a `LensError`.
+async fn request_references_and_citations_with_parents<T>(
+    id_list: &[T],
+    search_for: &SearchFor,
+    api_key: &str,
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<ParentWithChildren>, LensError>
+where
+    T: AsRef<str>,
+{
+    let all_results = futures::future::join_all(id_list.chunks(1000).map(|chunk| {
+        request_references_and_citations_with_parents_chunk(chunk, search_for, api_key, client)
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, LensError>>()?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+
+    if all_results.is_empty() {
+        return Err(LensError::NoArticlesFound);
+    }
+
+    Ok(all_results)
+}
+
+/// Helper function that processes a single chunk (≤1000 articles) for the parent-child mapping.
+async fn request_references_and_citations_with_parents_chunk<T>(
+    id_list: &[T],
+    search_for: &SearchFor,
+    api_key: &str,
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<ParentWithChildren>, LensError>
+where
+    T: AsRef<str>,
+{
+    let client = match client {
+        Some(t) => t,
+        None => &reqwest::Client::new(),
+    };
+
+    // Determine which fields to include based on the search direction
+    let include = match search_for {
+        SearchFor::Both => vec!["lens_id", "references", "scholarly_citations"],
+        SearchFor::Citations => vec!["lens_id", "scholarly_citations"],
+        SearchFor::References => vec!["lens_id", "references"],
+    };
+
+    let id_strs: Vec<&str> = id_list.iter().map(|id| id.as_ref()).collect();
+    let response = request_response(client, api_key, &id_strs, "lens_id", &include).await?;
+
+    let json_str = response.text().await?;
+    let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
+
+    let articles = serde_json::from_value::<Vec<ArticleWithReferencesAndCitations>>(
+        json_value["data"].clone(),
+    )?;
+
+    // Convert to ParentWithChildren
+    let results = articles
+        .into_iter()
+        .map(|article| ParentWithChildren {
+            parent_id: article.lens_id,
+            children: article.refs_and_cites.get_both(),
+        })
+        .collect();
+
+    Ok(results)
+}
+
 /// Performs a snowballing expansion of a citation network starting from Lens.org IDs.
 ///
 /// This function iteratively finds references and/or citations for the current set
@@ -413,6 +511,86 @@ fn probable_output_size(max_depth: u8) -> usize {
     let max_depth = max_depth as usize;
     // Simple heuristic: grows exponentially with depth
     100 << (7 * (max_depth - 1)) // around 100^(max_depth-1) but fast
+}
+
+/// Optimized snowball function that deduplicates API requests.
+///
+/// This function performs the same citation expansion as `snowball`, but with
+/// an important optimization: each unique article ID is queried only once per depth level.
+/// The occurrence counts are tracked and multiplied appropriately to maintain
+/// identical scoring behavior.
+///
+/// # Algorithm
+///
+/// - **Within iteration**: Multiply child counts by parent count
+///   (if parent A appears 5 times and cites child D, then D gets count 5)
+/// - **Across iterations**: Add counts together
+///   (if D appears in depth 1 and depth 2, sum the counts)
+///
+/// # Arguments
+///
+/// * `src_lensid`: A slice of seed article IDs to start the snowball from.
+/// * `max_depth`: The maximum depth of the snowballing process.
+/// * `search_for`: Specifies whether to search for references, citations, or both.
+/// * `api_key`: The API key for Lens.org.
+/// * `client`: An optional `reqwest::Client` to use for requests.
+///
+/// # Returns
+///
+/// A `Result` containing a `LensIdCounter` with occurrence counts, or a `LensError`.
+pub async fn snowball2<T>(
+    src_lensid: &[T],
+    max_depth: u8,
+    search_for: &SearchFor,
+    api_key: &str,
+    client: Option<&reqwest::Client>,
+) -> Result<LensIdCounter, LensError>
+where
+    T: AsRef<str>,
+{
+    // Counter to accumulate results across all depths (ADDITION across iterations)
+    let mut all_counts = LensIdCounter::with_capacity(probable_output_size(max_depth));
+
+    // Start with depth 1: direct references/citations of the source IDs
+    let depth1_results =
+        request_references_and_citations(src_lensid, search_for, api_key, client).await?;
+    let mut current_counts = LensIdCounter::from(depth1_results);
+
+    // Add depth 1 counts to total
+    all_counts.add_from(&current_counts);
+
+    // Iterate for the remaining depths
+    for _ in 1..max_depth {
+        let mut next_counts = LensIdCounter::new();
+
+        // Collect unique IDs from current depth (DEDUPLICATION!)
+        let unique_ids: Vec<&LensId> = current_counts.keys().collect();
+
+        if unique_ids.is_empty() {
+            break;
+        }
+
+        // Query all unique parent IDs in a batch, preserving parent-child relationships
+        let parents_with_children =
+            request_references_and_citations_with_parents(&unique_ids, search_for, api_key, client)
+                .await?;
+
+        // MULTIPLICATION: each child inherits the parent's count
+        // If parent appears 5 times and cites child D, then D gets +5 to its count
+        for parent_with_children in parents_with_children {
+            let parent_count = current_counts.get(&parent_with_children.parent_id);
+
+            for child_id in parent_with_children.children {
+                next_counts.add_single_with_count(child_id, parent_count);
+            }
+        }
+
+        // ADDITION: add this depth's counts to the total
+        all_counts.add(next_counts.clone());
+        current_counts = next_counts;
+    }
+
+    Ok(all_counts)
 }
 
 #[cfg(test)]
@@ -549,5 +727,50 @@ mod tests {
                 .unwrap();
 
         assert!(direct_references.len() >= 76);
+    }
+
+    /// Tests that snowball2 (optimized) produces identical results to snowball (original).
+    #[tokio::test]
+    async fn snowball2_matches_snowball() {
+        let id_list = ["020-200-401-307-33X", "050-708-976-791-252"];
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
+        let client = reqwest::Client::new();
+
+        // Run original snowball
+        let original_results = snowball(&id_list, 2, &SearchFor::Both, &api_key, Some(&client))
+            .await
+            .unwrap();
+
+        // Convert to counter for comparison
+        let original_counter = LensIdCounter::from(original_results);
+
+        // Run optimized snowball2
+        let optimized_counter = snowball2(&id_list, 2, &SearchFor::Both, &api_key, Some(&client))
+            .await
+            .unwrap();
+
+        // Verify same number of unique IDs
+        assert_eq!(
+            original_counter.len(),
+            optimized_counter.len(),
+            "Different number of unique IDs"
+        );
+
+        // Verify each ID has the same count
+        for (id, count) in original_counter.iter() {
+            let optimized_count = optimized_counter.get(id);
+            assert_eq!(
+                *count,
+                optimized_count,
+                "Count mismatch for ID {}: original={}, optimized={}",
+                id.as_ref(),
+                count,
+                optimized_count
+            );
+        }
+
+        println!("✓ snowball2 produces identical results to snowball");
+        println!("  Total unique IDs: {}", original_counter.len());
+        println!("  All counts match!");
     }
 }

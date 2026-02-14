@@ -1,5 +1,5 @@
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde::de::{self, Visitor, SeqAccess};
 use std::marker::PhantomData;
 
 use super::lensid::LensId;
@@ -17,8 +17,8 @@ impl<'de> Deserialize<'de> for References {
     /// This is needed because the API returns a list of objects like
     /// `{"lens_id": "..."}` instead of just a list of Lens IDs.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         let visitor = ReferencesVisitor(PhantomData);
         deserializer.deserialize_seq(visitor)
@@ -46,10 +46,12 @@ impl<'de> Visitor<'de> for ReferencesVisitor {
             let map: serde_json::Map<String, serde_json::Value> = value;
             let lensid_value = map.get("lens_id");
             if let Some(lensid_value) = lensid_value {
-                let lensid_str = lensid_value.as_str()
+                let lensid_str = lensid_value
+                    .as_str()
                     .ok_or_else(|| de::Error::custom("error converting lensid value to string"))?;
                 let lensid = LensId::try_from(lensid_str)
-                    .ok().ok_or_else(|| de::Error::custom("invalid lensid"))?;
+                    .ok()
+                    .ok_or_else(|| de::Error::custom("invalid lensid"))?;
                 out.0.push(lensid)
             }
         }
@@ -65,7 +67,6 @@ impl<'de> Visitor<'de> for ReferencesVisitor {
 #[derive(Debug, Default, Deserialize)]
 pub struct ScholarlyCitations(pub Vec<LensId>);
 
-
 /// Combines references and scholarly citations lists from the Lens.org API response.
 #[derive(Debug, Default, Deserialize)]
 pub struct ReferencesAndCitations {
@@ -74,7 +75,7 @@ pub struct ReferencesAndCitations {
     pub references: References,
     /// The list of scholarly citations that cite the article.
     #[serde(default)]
-    pub scholarly_citations: ScholarlyCitations
+    pub scholarly_citations: ScholarlyCitations,
 }
 
 impl ReferencesAndCitations {
@@ -85,4 +86,11 @@ impl ReferencesAndCitations {
 
         references.chain(scholarly_citations).collect()
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArticleWithReferencesAndCitations {
+    pub lens_id: LensId,
+    #[serde(flatten)]
+    pub refs_and_cites: ReferencesAndCitations,
 }
