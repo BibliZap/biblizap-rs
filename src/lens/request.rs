@@ -1,6 +1,7 @@
 use crate::lens::error::LensApiErrorInfo;
 
 use super::error::*;
+use serde::Deserialize;
 
 /// Makes a POST request to the Lens.org API's scholarly search endpoint.
 ///
@@ -97,6 +98,91 @@ fn seconds_to_wait_from_response(
     header_value: &reqwest::header::HeaderValue,
 ) -> Result<u64, RateLimitExtractionError> {
     Ok(header_value.to_str()?.parse::<u64>()?)
+}
+
+/// Wrapper struct for Lens.org API responses.
+///
+/// The Lens API returns data in a wrapper object with a "data" field containing
+/// the actual array of results. This struct allows for efficient direct deserialization.
+#[derive(Debug, Deserialize)]
+struct LensApiResponse<T> {
+    data: Vec<T>,
+}
+
+/// Requests data from Lens.org API and parses it with optimized direct deserialization.
+///
+/// This is a higher-level wrapper around `request_response` that automatically handles
+/// JSON parsing using direct deserialization (no intermediate `serde_json::Value`, no clones).
+///
+/// # Performance
+///
+/// This function is optimized for performance:
+/// - Parses JSON directly to the target type (no intermediate `Value`)
+/// - Avoids cloning the response data
+/// - Single parse pass instead of two
+///
+/// # Type Safety Warning
+///
+/// ⚠️ **IMPORTANT**: The type `T` must match the fields specified in `include`.
+///
+/// For example:
+/// - If `include` contains `["lens_id", "scholarly_citations"]`, then `T` should have
+///   a `scholarly_citations` field (or mark it with `#[serde(default)]` to allow missing).
+/// - If `include` contains `["lens_id", "title", "authors"]`, then `T` should have
+///   `title` and `authors` fields.
+///
+/// Mismatches between `T` and `include` will cause deserialization errors at runtime.
+/// Use `#[serde(default)]` on optional fields to handle missing data gracefully.
+///
+/// # Arguments
+///
+/// * `client`: The `reqwest::Client` to use for the request.
+/// * `api_key`: The API key for Lens.org.
+/// * `id_list`: An iterator of IDs to search for. Must be serializable.
+/// * `id_type`: The type of IDs in `id_list` (e.g., "pmid", "lens_id", "doi").
+/// * `include`: A slice of strings specifying which fields to include in the response.
+///
+/// # Returns
+///
+/// A `Result` containing a `Vec<T>` of parsed results, or a `LensError`.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Request citations
+/// let citations: Vec<ArticleWithCitations> = request_and_parse(
+///     &client,
+///     &api_key,
+///     &["some-lens-id"],
+///     "lens_id",
+///     &["lens_id", "scholarly_citations"]
+/// ).await?;
+///
+/// // Request complete articles
+/// let articles: Vec<Article> = request_and_parse(
+///     &client,
+///     &api_key,
+///     &["some-lens-id"],
+///     "lens_id",
+///     &["lens_id", "title", "authors", "abstract"]
+/// ).await?;
+/// ```
+pub async fn request_and_parse<T>(
+    client: &reqwest::Client,
+    api_key: &str,
+    id_list: impl IntoIterator<Item = impl serde::Serialize> + serde::Serialize,
+    id_type: &str,
+    include: &[&str],
+) -> Result<Vec<T>, LensError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let response = request_response(client, api_key, id_list, id_type, include).await?;
+    let json_str = response.text().await?;
+
+    // Direct deserialization - no intermediate Value, no clone!
+    let parsed: LensApiResponse<T> = serde_json::from_str(&json_str)?;
+    Ok(parsed.data)
 }
 
 /// Constructs the JSON request body for a Lens.org scholarly search API request.

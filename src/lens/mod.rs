@@ -8,11 +8,20 @@ pub mod request;
 use super::common::SearchFor;
 
 use article::Article;
-use citations::{ArticleWithReferencesAndCitations, ReferencesAndCitations};
+use citations::ReferencesAndCitations;
 use counter::LensIdCounter;
 use error::LensError;
 use lensid::LensId;
-use request::request_response;
+use request::request_and_parse;
+
+/// Helper struct that includes both the parent ID and its references/citations.
+/// This can be deserialized directly from the Lens API response.
+#[derive(Debug, serde::Deserialize)]
+struct ArticleWithReferencesAndCitations {
+    lens_id: LensId,
+    #[serde(flatten)]
+    refs_and_cites: ReferencesAndCitations,
+}
 
 /// A helper struct to categorize raw string IDs into known types (PMID, Lens ID, DOI).
 struct TypedIdList<'a> {
@@ -186,16 +195,8 @@ async fn complete_articles_typed(
         "year_published",
     ];
 
-    let response = request_response(client, api_key, id_list, id_type, &include).await?;
-
-    let json_str = response.text().await?;
-
-    let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
-
-    // Deserialize the 'data' field of the response into a vector of Articles
-    let ret: Vec<Article> = serde_json::from_value::<Vec<Article>>(json_value["data"].clone())?;
-
-    Ok(ret)
+    // Use optimized direct deserialization
+    request_and_parse(client, api_key, id_list, id_type, &include).await
 }
 
 /// Requests references and/or citations for a list of article IDs from the Lens.org API.
@@ -339,13 +340,13 @@ async fn request_references_and_citations_typed_chunk(
         SearchFor::Citations => vec!["lens_id", "scholarly_citations"],
         SearchFor::References => vec!["lens_id", "references"],
     };
-    let response = request_response(client, api_key, id_list, id_type, &include).await?;
 
-    let json_str = response.text().await?;
-    let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
+    // Use optimized direct deserialization
+    let refs_and_cites: Vec<ReferencesAndCitations> =
+        request_and_parse(client, api_key, id_list, id_type, &include).await?;
 
-    // Deserialize the 'data' field and extract all related Lens IDs
-    let ret = serde_json::from_value::<Vec<ReferencesAndCitations>>(json_value["data"].clone())?
+    // Extract all related Lens IDs
+    let ret = refs_and_cites
         .into_iter()
         .flat_map(|n| n.get_both())
         .collect::<Vec<_>>();
@@ -428,14 +429,10 @@ where
     };
 
     let id_strs: Vec<&str> = id_list.iter().map(|id| id.as_ref()).collect();
-    let response = request_response(client, api_key, &id_strs, "lens_id", &include).await?;
 
-    let json_str = response.text().await?;
-    let json_value: serde_json::Value = serde_json::from_str(&json_str)?;
-
-    let articles = serde_json::from_value::<Vec<ArticleWithReferencesAndCitations>>(
-        json_value["data"].clone(),
-    )?;
+    // Use optimized direct deserialization
+    let articles: Vec<ArticleWithReferencesAndCitations> =
+        request_and_parse(client, api_key, &id_strs, "lens_id", &include).await?;
 
     // Convert to ParentWithChildren
     let results = articles
