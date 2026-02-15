@@ -1,4 +1,6 @@
 pub mod article;
+#[cfg(feature = "cache")]
+pub mod cache;
 pub mod citations;
 pub mod counter;
 pub mod error;

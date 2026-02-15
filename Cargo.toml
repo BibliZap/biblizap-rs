@@ -5,6 +5,13 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+# Cache features are mutually exclusive - use either cache-sqlite OR cache-postgres, not both
+cache = ["sqlx"]
+cache-sqlite = ["cache", "sqlx/sqlite"]
+cache-postgres = ["cache", "sqlx/postgres"]
+
 [dependencies]
 anyhow = "1.0.75"
 arrayvec = { version = "0.7.4", features = ["serde"] }
@@ -19,6 +26,7 @@ serde = { version = "1.0.188", features = ["serde_derive"] }
 serde_json = "1.0.107"
 thiserror = "1.0.48"
 tokio = { version = "1.32.0", features = ["rt", "full"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "macros"], optional = true }
 
 [dev-dependencies]
 dotenvy = "0.15.7"

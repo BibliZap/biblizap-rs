@@ -5,7 +5,7 @@ use thiserror::Error;
 pub enum LensError {
     #[error("All provided IDs are invalid")]
     NoValidIdsInInputList,
-    #[error("Lens API is unresponsive")]
+    #[error("Lens API is unresponsive : {0}")]
     Request(#[from] reqwest::Error),
     #[error("Failed to extract rate limit information")]
     RateLimitExtraction(#[from] RateLimitExtractionError),
@@ -15,6 +15,9 @@ pub enum LensError {
     SerdeJson(#[from] serde_json::Error),
     #[error("No articles found for the given query, please check if your input IDs exist")]
     NoArticlesFound,
+    #[cfg(feature = "cache")]
+    #[error("Database error: {0}")]
+    SqlxError(#[from] sqlx::Error),
 }
 
 #[derive(Error, Debug)]
