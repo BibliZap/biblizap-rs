@@ -14,6 +14,7 @@
 
 #[cfg(feature = "cache")]
 use biblizap_rs::lens::cache::{CacheResult, LensCache};
+#[cfg(feature = "cache")]
 use biblizap_rs::lens::lensid::LensId;
 
 #[tokio::main]
