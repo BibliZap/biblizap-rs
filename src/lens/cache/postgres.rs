@@ -302,28 +302,41 @@ impl PostgresBackend {
 mod tests {
     use super::*;
     use crate::lens::cache::compute_misses;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    // Global counter for unique schema names
-    static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Helper to create an isolated PostgreSQL backend for testing
     ///
-    /// Each test gets its own schema, preventing interference between parallel tests.
+    /// Each test gets its own schema with a unique timestamp-based name.
+    /// This ensures complete isolation between tests, even across test runs.
+    /// Old test schemas remain in the database but don't affect new tests.
     /// Similar to SQLite's `:memory:` - each test is completely isolated.
+    ///
+    /// Note: Test schemas accumulate in the database. Clean them up manually if needed:
+    /// ```sql
+    /// SELECT 'DROP SCHEMA IF EXISTS ' || schema_name || ' CASCADE;'
+    /// FROM information_schema.schemata
+    /// WHERE schema_name LIKE 'test_%';
+    /// ```
     async fn create_test_backend() -> Result<PostgresBackend, LensError> {
         let url = std::env::var("TEST_POSTGRES_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://postgres@localhost/lens_test".to_string());
 
-        // Create unique schema name for this test
-        let schema_id = SCHEMA_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let schema_name = format!("test_schema_{schema_id}");
+        // Create unique schema name using timestamp + random component
+        // This ensures uniqueness even across test runs
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        let random = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let schema_name = format!("test_{timestamp}_{random}");
 
         // First connect to create the schema
         let pool = PgPool::connect(&url).await.map_err(LensError::SqlxError)?;
 
         // Create isolated schema for this test
-        sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema_name}"))
+        sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
             .execute(&pool)
             .await?;
 
