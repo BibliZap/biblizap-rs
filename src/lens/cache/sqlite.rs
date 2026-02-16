@@ -1,9 +1,9 @@
-//! PostgreSQL backend implementation for the Lens cache
+//! SQLite backend implementation for the Lens cache
 
 use crate::lens::error::LensError;
 use crate::lens::lensid::LensId;
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 
 use super::CacheBackend;
@@ -32,9 +32,9 @@ struct CitationsRow {
 }
 
 impl CitationsRow {
-    fn extract(self) -> Result<(LensId, Vec<String>), LensError> {
+    fn extract(self) -> Result<(LensId, Vec<LensId>), LensError> {
         let lens_id = LensId::try_from(self.lens_id.as_str())?;
-        let citations: Vec<String> = serde_json::from_str(&self.citations_json)
+        let citations: Vec<LensId> = serde_json::from_str(&self.citations_json)
             .ok()
             .unwrap_or_default();
 
@@ -42,23 +42,23 @@ impl CitationsRow {
     }
 }
 
-/// PostgreSQL-based cache backend
+/// SQLite-based cache backend
 ///
 /// Uses two tables:
 /// - `article_references`: stores immutable outgoing edges
 /// - `article_citations`: stores mutable incoming edges with timestamps
 ///
 /// Optimized for bulk operations with:
-/// - Chunked multi-row inserts (more generous limits than SQLite)
+/// - Chunked multi-row inserts (respects SQLite parameter limits)
 /// - Single-transaction commits
-/// - Native array operations with ANY() for efficient queries
-/// - JSONB columns for better performance than TEXT
-pub struct PostgresBackend {
-    pool: PgPool,
+/// - WAL mode for better concurrency
+/// - JSON-based queries to avoid parameter count limits
+pub struct SqliteBackend {
+    pool: SqlitePool,
 }
 
 #[async_trait]
-impl CacheBackend for PostgresBackend {
+impl CacheBackend for SqliteBackend {
     async fn get_references(
         &self,
         ids: &[LensId],
@@ -67,17 +67,16 @@ impl CacheBackend for PostgresBackend {
             return Ok(HashMap::new());
         }
 
-        // PostgreSQL allows us to use ANY with an array - more efficient than JSON
-        let ids_vec: Vec<String> = ids.iter().map(|id| id.as_ref().to_string()).collect();
+        let ids_json = Self::ids_to_json(ids)?;
 
         let rows: Vec<ReferencesRow> = sqlx::query_as(
             r#"
                 SELECT lens_id, references_json
                 FROM article_references
-                WHERE lens_id = ANY($1)
+                WHERE lens_id IN (SELECT value FROM json_each(?))
             "#,
         )
-        .bind(&ids_vec)
+        .bind(&ids_json)
         .fetch_all(&self.pool)
         .await?;
 
@@ -89,10 +88,7 @@ impl CacheBackend for PostgresBackend {
             return Ok(());
         }
 
-        // PostgreSQL has higher parameter limits, so we can use larger chunks
-        // Postgres default max_prepared_transactions is 32767 parameters
-        // With 3 params per row: 32767 / 3 = ~10922, use 5000 for safety
-        const CHUNK_SIZE: usize = 5000;
+        const CHUNK_SIZE: usize = 333;
 
         // Start transaction for all chunks
         let mut tx = self.pool.begin().await?;
@@ -131,7 +127,7 @@ impl CacheBackend for PostgresBackend {
             builder.build().execute(&mut *tx).await?;
         }
 
-        // Commit once at the end
+        // Commit once at the end (single fsync)
         tx.commit().await?;
 
         Ok(())
@@ -140,22 +136,21 @@ impl CacheBackend for PostgresBackend {
     async fn get_citations(
         &self,
         ids: &[LensId],
-    ) -> Result<HashMap<LensId, Vec<String>>, LensError> {
+    ) -> Result<HashMap<LensId, Vec<LensId>>, LensError> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
 
-        // Use PostgreSQL's native array operations
-        let ids_vec: Vec<String> = ids.iter().map(|id| id.as_ref().to_string()).collect();
+        let ids_json = Self::ids_to_json(ids)?;
 
         let rows: Vec<CitationsRow> = sqlx::query_as(
             r#"
                 SELECT lens_id, citations_json
                 FROM article_citations
-                WHERE lens_id = ANY($1)
+                WHERE lens_id IN (SELECT value FROM json_each(?))
             "#,
         )
-        .bind(&ids_vec)
+        .bind(&ids_json)
         .fetch_all(&self.pool)
         .await?;
 
@@ -167,7 +162,7 @@ impl CacheBackend for PostgresBackend {
             return Ok(());
         }
 
-        const CHUNK_SIZE: usize = 5000;
+        const CHUNK_SIZE: usize = 333;
 
         // Start transaction for all chunks
         let mut tx = self.pool.begin().await?;
@@ -202,13 +197,13 @@ impl CacheBackend for PostgresBackend {
 
             // For citations, we want to update with fresh data on conflict
             builder.push(
-                " ON CONFLICT (lens_id) DO UPDATE SET citations_json = EXCLUDED.citations_json, fetched_at = EXCLUDED.fetched_at",
+                " ON CONFLICT (lens_id) DO UPDATE SET citations_json = excluded.citations_json, fetched_at = excluded.fetched_at",
             );
 
             builder.build().execute(&mut *tx).await?;
         }
 
-        // Commit once at the end
+        // Commit once at the end (single fsync)
         tx.commit().await?;
 
         Ok(())
@@ -231,33 +226,33 @@ impl CacheBackend for PostgresBackend {
     }
 }
 
-impl PostgresBackend {
-    /// Create a new PostgreSQL backend from a connection URL
+impl SqliteBackend {
+    /// Create a new SQLite backend from a connection URL
     ///
     /// # Arguments
-    /// * `url` - PostgreSQL connection URL (e.g., "postgres://user:pass@localhost/dbname")
+    /// * `url` - SQLite connection URL (e.g., "sqlite::memory:" or "sqlite:cache.db")
     ///
     /// # Example
     /// ```ignore
-    /// let backend = PostgresBackend::from_url("postgres://localhost/lens_cache").await?;
+    /// let backend = SqliteBackend::new("sqlite::memory:").await?;
     /// ```
     pub async fn from_url(url: &str) -> Result<Self, LensError> {
-        let pool = PgPool::connect(url).await?;
+        let pool = SqlitePool::connect(url).await?;
         Self::run_migrations(&pool).await?;
-        Self::optimize_postgres(&pool).await?;
+        Self::optimize_sqlite(&pool).await?;
 
         Ok(Self { pool })
     }
 
     /// Run database migrations (creates tables if they don't exist)
-    async fn run_migrations(pool: &PgPool) -> Result<(), LensError> {
+    async fn run_migrations(pool: &SqlitePool) -> Result<(), LensError> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS article_references (
                 lens_id TEXT PRIMARY KEY,
                 references_json TEXT NOT NULL,
-                fetched_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
-            )
+                fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
+            ) WITHOUT ROWID
             "#,
         )
         .execute(pool)
@@ -268,14 +263,13 @@ impl PostgresBackend {
             CREATE TABLE IF NOT EXISTS article_citations (
                 lens_id TEXT PRIMARY KEY,
                 citations_json TEXT NOT NULL,
-                fetched_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
-            )
+                fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
+            ) WITHOUT ROWID
             "#,
         )
         .execute(pool)
         .await?;
 
-        // Create index on fetched_at for citations (useful for TTL queries)
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_citations_fetched ON article_citations(fetched_at)",
         )
@@ -285,73 +279,48 @@ impl PostgresBackend {
         Ok(())
     }
 
-    /// Apply PostgreSQL-specific optimizations
-    async fn optimize_postgres(pool: &PgPool) -> Result<(), LensError> {
-        // Analyze tables to update statistics for the query planner
-        // This is safe to run even if tables are empty
-        let _ = sqlx::query("ANALYZE article_references")
+    /// Apply SQLite-specific optimizations
+    async fn optimize_sqlite(pool: &SqlitePool) -> Result<(), LensError> {
+        // Enable WAL mode for better concurrency
+        sqlx::query("PRAGMA journal_mode = WAL")
             .execute(pool)
-            .await;
+            .await?;
 
-        let _ = sqlx::query("ANALYZE article_citations").execute(pool).await;
+        // Optimize for speed
+        sqlx::query("PRAGMA synchronous = NORMAL")
+            .execute(pool)
+            .await?;
+
+        // Use memory for temp tables
+        sqlx::query("PRAGMA temp_store = MEMORY")
+            .execute(pool)
+            .await?;
+
+        // Set larger cache size (64MB)
+        sqlx::query("PRAGMA cache_size = -64000")
+            .execute(pool)
+            .await?;
 
         Ok(())
+    }
+
+    /// Convert a slice of LensIds to a JSON string for use in queries
+    ///
+    /// This allows us to pass many IDs in a single parameter using json_each()
+    fn ids_to_json(ids: &[LensId]) -> Result<String, LensError> {
+        let json = serde_json::to_string(&ids.iter().map(|id| id.as_ref()).collect::<Vec<_>>())?;
+        Ok(json)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lens::cache2::compute_misses;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    // Global counter for unique schema names
-    static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    /// Helper to create an isolated PostgreSQL backend for testing
-    ///
-    /// Each test gets its own schema, preventing interference between parallel tests.
-    /// Similar to SQLite's `:memory:` - each test is completely isolated.
-    async fn create_test_backend() -> Result<PostgresBackend, LensError> {
-        let url = std::env::var("TEST_POSTGRES_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://postgres@localhost/lens_test".to_string());
-
-        // Create unique schema name for this test
-        let schema_id = SCHEMA_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let schema_name = format!("test_schema_{schema_id}");
-
-        // First connect to create the schema
-        let pool = PgPool::connect(&url).await.map_err(LensError::SqlxError)?;
-
-        // Create isolated schema for this test
-        sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema_name}"))
-            .execute(&pool)
-            .await?;
-
-        pool.close().await;
-
-        // Reconnect with schema in the connection string
-        // This ensures ALL connections from the pool use this schema
-        let url_with_schema = format!("{url}?options=-c%20search_path%3D{schema_name}");
-        let pool = PgPool::connect(&url_with_schema)
-            .await
-            .map_err(LensError::SqlxError)?;
-
-        // Run migrations in the isolated schema
-        PostgresBackend::run_migrations(&pool).await?;
-
-        Ok(PostgresBackend { pool })
-    }
-
-    // Note: These tests require a running PostgreSQL instance
-    // Set TEST_POSTGRES_DATABASE_URL environment variable to run them
-    // Example: TEST_POSTGRES_DATABASE_URL=postgres://postgres:password@localhost/lens_test
-    //
-    // Each test runs in its own schema, so they can run in parallel without interference!
+    use crate::lens::cache::compute_misses;
 
     #[tokio::test]
     async fn test_store_and_get_references() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         // Create test data
         let id1 = LensId::from(12345678901234);
@@ -382,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_references_immutable() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let refs1 = vec![LensId::from(1), LensId::from(2)];
@@ -407,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_and_get_citations() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let id2 = LensId::from(98765432109876);
@@ -425,23 +394,8 @@ mod tests {
         let result = backend.get_citations(&[id1.clone(), id2.clone()]).await?;
 
         assert_eq!(result.len(), 2);
-
-        // Convert Vec<String> back to Vec<LensId> for comparison
-        let result_cites1: Vec<LensId> = result
-            .get(&id1)
-            .unwrap()
-            .iter()
-            .map(|s| LensId::try_from(s.as_str()).unwrap())
-            .collect();
-        let result_cites2: Vec<LensId> = result
-            .get(&id2)
-            .unwrap()
-            .iter()
-            .map(|s| LensId::try_from(s.as_str()).unwrap())
-            .collect();
-
-        assert_eq!(result_cites1, cites1);
-        assert_eq!(result_cites2, cites2);
+        assert_eq!(result.get(&id1).unwrap(), &cites1);
+        assert_eq!(result.get(&id2).unwrap(), &cites2);
 
         // Query non-existent ID
         let result = backend.get_citations(&[id3.clone()]).await?;
@@ -452,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_citations_updates_on_conflict() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let cites1 = vec![LensId::from(10), LensId::from(20)];
@@ -470,21 +424,14 @@ mod tests {
 
         // Should return the updated citations
         let result = backend.get_citations(&[id1.clone()]).await?;
-        let result_cites: Vec<LensId> = result
-            .get(&id1)
-            .unwrap()
-            .iter()
-            .map(|s| LensId::try_from(s.as_str()).unwrap())
-            .collect();
-
-        assert_eq!(result_cites, cites2);
+        assert_eq!(result.get(&id1).unwrap(), &cites2);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_empty_input_handling() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         // Test empty get_references
         let result = backend.get_references(&[]).await?;
@@ -505,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let id2 = LensId::from(98765432109876);
@@ -541,11 +488,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_insert_chunking() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
-        // Create a batch larger than SQLite's CHUNK_SIZE (333) but smaller than Postgres's (5000)
+        // Create a batch larger than CHUNK_SIZE (333)
         let mut batch = Vec::new();
-        for i in 0..1000 {
+        for i in 0..500 {
             let id = LensId::from(10000000000000 + i);
             let refs = vec![LensId::from(i), LensId::from(i + 1)];
             batch.push((id, refs));
@@ -557,14 +504,14 @@ mod tests {
         // Verify all were stored
         let ids: Vec<LensId> = batch.iter().map(|(id, _)| id.clone()).collect();
         let result = backend.get_references(&ids).await?;
-        assert_eq!(result.len(), 1000);
+        assert_eq!(result.len(), 500);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_compute_misses() -> Result<(), LensError> {
-        let backend = create_test_backend().await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let id2 = LensId::from(98765432109876);

@@ -69,12 +69,12 @@ pub trait CacheBackend: Send + Sync {
 
     /// Retrieve citations (incoming edges) for the given article IDs
     ///
-    /// Returns citations as strings. Citations may be stale and should be
+    /// Returns citations as LensIds. Citations may be stale and should be
     /// refreshed periodically based on `fetched_at` timestamps.
     async fn get_citations(
         &self,
         ids: &[LensId],
-    ) -> Result<HashMap<LensId, Vec<String>>, LensError>;
+    ) -> Result<HashMap<LensId, Vec<LensId>>, LensError>;
 
     /// Store citations (incoming edges) for articles
     ///
