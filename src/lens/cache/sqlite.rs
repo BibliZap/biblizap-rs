@@ -2,7 +2,6 @@
 
 use crate::lens::error::LensError;
 use crate::lens::lensid::LensId;
-use async_trait::async_trait;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
@@ -57,7 +56,6 @@ pub struct SqliteBackend {
     pool: SqlitePool,
 }
 
-#[async_trait]
 impl CacheBackend for SqliteBackend {
     async fn get_references(
         &self,

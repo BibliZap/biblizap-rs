@@ -8,9 +8,8 @@ edition = "2021"
 [features]
 default = []
 # Cache features are mutually exclusive - use either cache-sqlite OR cache-postgres, not both
-cache = ["sqlx", "dep:async-trait"]
-cache-sqlite = ["cache", "sqlx/sqlite"]
-cache-postgres = ["cache", "sqlx/postgres"]
+cache-sqlite = ["sqlx", "sqlx/sqlite"]
+cache-postgres = ["sqlx", "sqlx/postgres"]
 
 [dependencies]
 anyhow = "1.0.75"
@@ -27,7 +26,6 @@ serde_json = "1.0.107"
 thiserror = "1.0.48"
 tokio = { version = "1.32.0", features = ["rt", "full"] }
 sqlx = { version = "0.7", features = ["runtime-tokio", "macros"], optional = true }
-async-trait = { version = "0.1.89", optional = true }
 
 [dev-dependencies]
 dotenvy = "0.15.7"

@@ -2,7 +2,7 @@
 
 use crate::lens::error::LensError;
 use crate::lens::lensid::LensId;
-use async_trait::async_trait;
+
 use sqlx::PgPool;
 use std::collections::HashMap;
 
@@ -57,7 +57,6 @@ pub struct PostgresBackend {
     pool: PgPool,
 }
 
-#[async_trait]
 impl CacheBackend for PostgresBackend {
     async fn get_references(
         &self,

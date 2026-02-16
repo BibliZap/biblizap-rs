@@ -19,7 +19,7 @@ pub enum LensError {
     NoArticlesFound,
     #[error(transparent)]
     LensIDError(#[from] LensIdError),
-    #[cfg(feature = "cache")]
+    #[cfg(any(feature = "cache-sqlite", feature = "cache-postgres"))]
     #[error("Database error: {0}")]
     SqlxError(#[from] sqlx::Error),
 }
