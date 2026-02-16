@@ -72,8 +72,7 @@ impl Visitor<'_> for LensIdVisitor {
         E: de::Error,
     {
         // Use the TryFrom implementation to validate and create the LensId
-        LensId::try_from(lensid_str)
-            .map_err(|e| de::Error::custom(format!("invalid lensid: {}", e)))
+        LensId::try_from(lensid_str).map_err(|e| de::Error::custom(format!("invalid lensid: {e}")))
     }
 }
 
@@ -224,25 +223,25 @@ impl From<u64> for LensId {
         }
 
         // Build string: XXX-XXX-XXX-XXX-XXC
-        for i in 0..3 {
+        (0..3).for_each(|i| {
             result.push((b'0' + digits[i]) as char);
-        }
+        });
         result.push('-');
-        for i in 3..6 {
+        (3..6).for_each(|i| {
             result.push((b'0' + digits[i]) as char);
-        }
+        });
         result.push('-');
-        for i in 6..9 {
+        (6..9).for_each(|i| {
             result.push((b'0' + digits[i]) as char);
-        }
+        });
         result.push('-');
-        for i in 9..12 {
+        (9..12).for_each(|i| {
             result.push((b'0' + digits[i]) as char);
-        }
+        });
         result.push('-');
-        for i in 12..14 {
+        (12..14).for_each(|i| {
             result.push((b'0' + digits[i]) as char);
-        }
+        });
         result.push(checksum);
 
         LensId {
@@ -270,7 +269,7 @@ mod tests {
         // Parse existing IDs to get their int values
         let id1 = LensId::try_from("020-200-401-307-33X").unwrap();
         let int1 = id1.as_u64();
-        println!("{}", int1);
+        println!("{int1}");
 
         // Recreate from u64 and verify it matches
         let recreated1 = LensId::from(int1);
@@ -343,6 +342,6 @@ mod tests {
     #[test]
     fn test_display_trait() {
         let id = LensId::try_from("020-200-401-307-33X").unwrap();
-        assert_eq!(format!("{}", id), "020-200-401-307-33X");
+        assert_eq!(format!("{id}"), "020-200-401-307-33X");
     }
 }

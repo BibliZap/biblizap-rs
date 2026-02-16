@@ -1,35 +1,12 @@
-use super::error::LensError;
-use super::lensid::LensId;
+//! SQLite backend implementation for the Lens cache
+
+use crate::lens::error::LensError;
+use crate::lens::lensid::LensId;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-pub fn compute_misses<T>(requested: &[LensId], hits: &HashMap<LensId, T>) -> Vec<LensId> {
-    let misses = requested
-        .iter()
-        .filter(|id| !hits.contains_key(id))
-        .cloned()
-        .collect();
-
-    misses
-}
-
-#[derive(Debug, Clone)]
-pub struct CacheResult<Content> {
-    /// Articles found in cache (lens_id → data)
-    pub hits: HashMap<LensId, Content>,
-    /// Articles not found in cache (need to fetch from API)
-    pub misses: Vec<LensId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct CitationsAndReferences {
-    /// List of articles that cite this article (incoming edges)
-    pub citations: Vec<String>,
-    /// List of articles that this article references (outgoing edges)
-    pub references: Vec<String>,
-}
+use super::CacheBackend;
 
 #[derive(sqlx::FromRow)]
 struct ReferencesRow {
@@ -65,28 +42,17 @@ impl CitationsRow {
     }
 }
 
-#[async_trait]
-pub trait CacheBackend: Send + Sync {
-    // References (immutable)
-    async fn get_references(
-        &self,
-        ids: &[LensId],
-    ) -> Result<HashMap<LensId, Vec<LensId>>, LensError>;
-
-    async fn store_references(&self, batch: &[(LensId, Vec<LensId>)]) -> Result<(), LensError>;
-
-    // Citations (with TTL)
-    async fn get_citations(
-        &self,
-        ids: &[LensId],
-    ) -> Result<HashMap<LensId, Vec<String>>, LensError>;
-
-    async fn store_citations(&self, batch: &[(LensId, Vec<LensId>)]) -> Result<(), LensError>;
-
-    // Maintenance
-    async fn clear(&self) -> Result<(), LensError>;
-}
-
+/// SQLite-based cache backend
+///
+/// Uses two tables:
+/// - `article_references`: stores immutable outgoing edges
+/// - `article_citations`: stores mutable incoming edges with timestamps
+///
+/// Optimized for bulk operations with:
+/// - Chunked multi-row inserts (respects SQLite parameter limits)
+/// - Single-transaction commits
+/// - WAL mode for better concurrency
+/// - JSON-based queries to avoid parameter count limits
 pub struct SqliteBackend {
     pool: SqlitePool,
 }
@@ -167,7 +133,6 @@ impl CacheBackend for SqliteBackend {
         Ok(())
     }
 
-    // Citations (with TTL)
     async fn get_citations(
         &self,
         ids: &[LensId],
@@ -244,7 +209,6 @@ impl CacheBackend for SqliteBackend {
         Ok(())
     }
 
-    // Maintenance
     async fn clear(&self) -> Result<(), LensError> {
         let mut tx = self.pool.begin().await?;
 
@@ -263,7 +227,16 @@ impl CacheBackend for SqliteBackend {
 }
 
 impl SqliteBackend {
-    pub async fn new(url: &str) -> Result<Self, LensError> {
+    /// Create a new SQLite backend from a connection URL
+    ///
+    /// # Arguments
+    /// * `url` - SQLite connection URL (e.g., "sqlite::memory:" or "sqlite:cache.db")
+    ///
+    /// # Example
+    /// ```ignore
+    /// let backend = SqliteBackend::new("sqlite::memory:").await?;
+    /// ```
+    pub async fn from_url(url: &str) -> Result<Self, LensError> {
         let pool = SqlitePool::connect(url).await?;
         Self::run_migrations(&pool).await?;
         Self::optimize_sqlite(&pool).await?;
@@ -271,6 +244,7 @@ impl SqliteBackend {
         Ok(Self { pool })
     }
 
+    /// Run database migrations (creates tables if they don't exist)
     async fn run_migrations(pool: &SqlitePool) -> Result<(), LensError> {
         sqlx::query(
             r#"
@@ -305,6 +279,7 @@ impl SqliteBackend {
         Ok(())
     }
 
+    /// Apply SQLite-specific optimizations
     async fn optimize_sqlite(pool: &SqlitePool) -> Result<(), LensError> {
         // Enable WAL mode for better concurrency
         sqlx::query("PRAGMA journal_mode = WAL")
@@ -329,6 +304,9 @@ impl SqliteBackend {
         Ok(())
     }
 
+    /// Convert a slice of LensIds to a JSON string for use in queries
+    ///
+    /// This allows us to pass many IDs in a single parameter using json_each()
     fn ids_to_json(ids: &[LensId]) -> Result<String, LensError> {
         let json = serde_json::to_string(&ids.iter().map(|id| id.as_ref()).collect::<Vec<_>>())?;
         Ok(json)
@@ -338,10 +316,11 @@ impl SqliteBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lens::cache2::compute_misses;
 
     #[tokio::test]
     async fn test_store_and_get_references() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         // Create test data
         let id1 = LensId::from(12345678901234);
@@ -372,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_references_immutable() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let refs1 = vec![LensId::from(1), LensId::from(2)];
@@ -397,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_and_get_citations() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let id2 = LensId::from(98765432109876);
@@ -442,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_citations_updates_on_conflict() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let cites1 = vec![LensId::from(10), LensId::from(20)];
@@ -474,7 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_input_handling() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         // Test empty get_references
         let result = backend.get_references(&[]).await?;
@@ -495,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let id2 = LensId::from(98765432109876);
@@ -531,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_insert_chunking() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         // Create a batch larger than CHUNK_SIZE (333)
         let mut batch = Vec::new();
@@ -554,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_misses() -> Result<(), LensError> {
-        let backend = SqliteBackend::new("sqlite::memory:").await?;
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
 
         let id1 = LensId::from(12345678901234);
         let id2 = LensId::from(98765432109876);

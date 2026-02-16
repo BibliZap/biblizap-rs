@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(articles.len(), src_id.len());
 
         for article in articles.into_iter() {
-            println!("{:#?}", article);
+            println!("{article:#?}");
         }
     }
 

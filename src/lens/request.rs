@@ -79,7 +79,7 @@ async fn request_response_with_body(
 
             let seconds_to_wait = seconds_to_wait_from_response(header_value)?;
 
-            log::debug!("Told to wait for {} seconds", seconds_to_wait);
+            log::debug!("Told to wait for {seconds_to_wait} seconds");
 
             async_std::task::sleep(std::time::Duration::from_secs(seconds_to_wait)).await;
         }
