@@ -4,5 +4,5 @@ use serde::Deserialize;
 pub enum SearchFor {
     References,
     Citations,
-    Both
+    Both,
 }

@@ -1,7 +1,7 @@
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde::de::{self, Visitor, SeqAccess};
-use std::marker::PhantomData;
 use serde_json::Map;
+use std::marker::PhantomData;
 
 use super::lensid::LensId;
 
@@ -27,7 +27,7 @@ pub struct Article {
     /// Information about the source (e.g., journal, conference).
     pub source: Option<Source>,
     /// The year of publication.
-    pub year_published: Option<i32>
+    pub year_published: Option<i32>,
 }
 
 /// Represents external identifiers for an article from the Lens.org API.
@@ -45,7 +45,7 @@ pub struct ExternalIds {
     /// List of PubMed Central IDs (PMCID).
     pub pmcid: Vec<String>,
     /// List of Microsoft Academic Graph IDs (MAGID).
-    pub magid: Vec<String>
+    pub magid: Vec<String>,
 }
 
 /// Represents an author in the Lens.org API response.
@@ -78,8 +78,8 @@ impl<'de> Deserialize<'de> for ExternalIds {
     /// `{"type": "doi", "value": "..."}`, so this visitor is needed
     /// to parse them into the structured `ExternalIds` struct.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         let visitor = ExternalIdsVisitor(PhantomData);
         deserializer.deserialize_seq(visitor)
@@ -111,11 +111,19 @@ impl<'de> Visitor<'de> for ExternalIdsVisitor {
                 .as_str()
                 .ok_or_else(|| de::Error::custom("failed to get type string"))?;
             match value_type {
-                "pmid" => out.pmid.push(ExternalIdsVisitor::get_value_field::<V>(map)?),
+                "pmid" => out
+                    .pmid
+                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
                 "doi" => out.doi.push(ExternalIdsVisitor::get_value_field::<V>(map)?),
-                "pmcid" => out.pmcid.push(ExternalIdsVisitor::get_value_field::<V>(map)?),
-                "magid" => out.magid.push(ExternalIdsVisitor::get_value_field::<V>(map)?),
-                "coreid" => out.coreid.push(ExternalIdsVisitor::get_value_field::<V>(map)?),
+                "pmcid" => out
+                    .pmcid
+                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
+                "magid" => out
+                    .magid
+                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
+                "coreid" => out
+                    .coreid
+                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
                 _ => {} // Ignore unknown types
             }
         }
@@ -130,14 +138,14 @@ impl<'de> ExternalIdsVisitor {
     where
         V: SeqAccess<'de>,
     {
-        Ok(map.get("value")
+        Ok(map
+            .get("value")
             .ok_or_else(|| de::Error::missing_field("value"))?
             .as_str()
             .ok_or_else(|| de::Error::custom("failed to get value string"))?
             .to_owned())
     }
 }
-
 
 impl Article {
     /// Gets the full name of the first author, if available.
@@ -147,7 +155,11 @@ impl Article {
         let authors = self.authors.clone()?;
         let author = authors.first()?;
 
-        Some(format!("{} {}", author.first_name.clone().unwrap_or_default(), author.last_name.clone().unwrap_or_default()))
+        Some(format!(
+            "{} {}",
+            author.first_name.clone().unwrap_or_default(),
+            author.last_name.clone().unwrap_or_default()
+        ))
     }
 
     /// Gets the first PMID (PubMed ID) from the external identifiers, if available.

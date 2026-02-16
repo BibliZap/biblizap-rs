@@ -7,8 +7,8 @@
 //! The snowballing functionality here is more limited, focusing on retrieving
 //! article details based on PMIDs and finding citing/referenced articles via E-Utilities.
 
-use regex::Regex;
 use anyhow::{Context, Result};
+use regex::Regex;
 
 /// Macro to construct regex patterns for extracting specific fields from PubMed's raw format.
 ///
@@ -52,7 +52,6 @@ lazy_static::lazy_static! {
     static ref ID_REGEX: Regex = Regex::new("(?s)<Id>(.*?)</Id>").expect("AUTHOR_REGEX failed to compile");
 }
 
-
 /// Represents an article with core bibliographic information retrieved from PubMed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Article {
@@ -63,7 +62,7 @@ pub struct Article {
     /// The abstract or summary of the article.
     pub summary: Option<String>,
     /// The list of authors.
-    pub authors: Option<Vec<String>>
+    pub authors: Option<Vec<String>>,
 }
 
 impl Article {
@@ -104,7 +103,10 @@ impl Article {
 
         /// Extracts all occurrences of a repeating field (like authors) using a regex.
         fn extract_all(article: &str, regex: &Regex, group: usize) -> Option<Vec<String>> {
-            let vec: Option<Vec<String>> = regex.captures_iter(article).map(|x| Some(clean_feature(x.get(group)?.as_str()))).collect();
+            let vec: Option<Vec<String>> = regex
+                .captures_iter(article)
+                .map(|x| Some(clean_feature(x.get(group)?.as_str())))
+                .collect();
             vec
         }
 
@@ -113,7 +115,7 @@ impl Article {
                 .with_context(|| format!("No PMID found for this article : \n{raw_article}"))?,
             title: extract_single(raw_article, &TITLE_REGEX, 1),
             summary: extract_single(raw_article, &ABSTRACT_REGEX, 1),
-            authors: extract_all(raw_article, &AUTHOR_REGEX, 1)
+            authors: extract_all(raw_article, &AUTHOR_REGEX, 1),
         })
     }
 
@@ -133,7 +135,6 @@ impl Article {
             .split("\r\n\r\n")
             .map(|x| Article::from_raw_article(x).unwrap())) // Note: Using unwrap here might panic on parsing errors
     }
-
 
     /// Requests raw article data from PubMed for a list of PMIDs.
     ///
@@ -158,8 +159,10 @@ impl Article {
         let body_to_raw_articles: Regex = Regex::new(r"(?s)<pre.*?(PMID.*)</pre>")?;
 
         Ok(body_to_raw_articles
-            .captures(&body).context("Capture failed")?
-            .get(1).context("Get group 1 failed")?
+            .captures(&body)
+            .context("Capture failed")?
+            .get(1)
+            .context("Get group 1 failed")?
             .as_str()
             .to_owned())
     }
@@ -198,7 +201,7 @@ impl Article {
 /// A `Result` containing a vector of strings representing the PMIDs of related articles,
 /// or an error if the request or parsing fails.
 async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
-    let src_pmid_comma =  src_pmid.join(",");
+    let src_pmid_comma = src_pmid.join(",");
     let asc_url: String = format!("{ASC_URL_BASE}{src_pmid_comma}");
     let desc_url: String = format!("{DESC_URL_BASE}{src_pmid_comma}");
 
@@ -208,12 +211,9 @@ async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
     let body: String = [body_desc, body_asc].join("\n");
 
     // Extract PMIDs from <Id> tags in the response
-    let dest_pmid : Result<Vec<_>> = ID_REGEX.captures_iter(&body)
-        .map(|x| anyhow::Ok(x
-            .get(1)
-            .context("Couldn't get ID")?
-            .as_str()
-            .to_owned()))
+    let dest_pmid: Result<Vec<_>> = ID_REGEX
+        .captures_iter(&body)
+        .map(|x| anyhow::Ok(x.get(1).context("Couldn't get ID")?.as_str().to_owned()))
         .skip(src_pmid.len()) // Skip n first as pubmed returns input as output before giving citations
         .collect();
 
@@ -234,15 +234,17 @@ async fn snowball_onestep_unsafe(src_pmid: &[&str]) -> Result<Vec<String>> {
 /// A `Result` containing a vector of strings representing the PMIDs of related articles,
 /// or an error if the request or parsing fails.
 pub async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
-    let dest_pmid = futures::future::join_all(src_pmid
+    let dest_pmid = futures::future::join_all(
+        src_pmid
             .chunks(325) // Chunk size to manage URL length
-            .map(snowball_onestep_unsafe))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<String>>();
+            .map(snowball_onestep_unsafe),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>();
 
     Ok(dest_pmid)
 }
@@ -264,7 +266,7 @@ pub async fn snowball_onestep(src_pmid: &[&str]) -> Result<Vec<String>> {
 /// A `Result` containing a vector of strings representing the unique PMIDs found
 /// during the snowballing, or an error if the process fails.
 pub async fn snowball(src_pmid: &[&str], max_depth: u8) -> Result<Vec<String>> {
-    let mut all_pmid : Vec<String> = Vec::new();
+    let mut all_pmid: Vec<String> = Vec::new();
 
     let mut current_pmid = src_pmid
         .iter()

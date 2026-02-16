@@ -1,6 +1,8 @@
 use reqwest::header::ToStrError;
 use thiserror::Error;
 
+use super::lensid::LensIdError;
+
 #[derive(Error, Debug)]
 pub enum LensError {
     #[error("All provided IDs are invalid")]
@@ -15,6 +17,8 @@ pub enum LensError {
     SerdeJson(#[from] serde_json::Error),
     #[error("No articles found for the given query, please check if your input IDs exist")]
     NoArticlesFound,
+    #[error(transparent)]
+    LensIDError(#[from] LensIdError),
     #[cfg(feature = "cache")]
     #[error("Database error: {0}")]
     SqlxError(#[from] sqlx::Error),

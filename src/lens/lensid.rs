@@ -26,7 +26,7 @@ pub enum LensIdError {
 ///
 /// Note: Equality comparison is based solely on the `int` field (first 18 digits).
 /// The string representation is assumed to be correct for performance.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct LensId {
     /// The integer representation of the first 18 digits of the Lens ID string.
     int: u64,
@@ -34,11 +34,14 @@ pub struct LensId {
     string: ArrayString<19>,
 }
 
-// Note: The `References` struct here seems misplaced and might belong in `citations.rs`.
-// Keeping it for documentation purposes based on the provided code, but it might need refactoring.
-/// Represents a list of Lens IDs, potentially used for references or citations.
-#[derive(Debug, Default)]
-pub struct References(pub Vec<LensId>);
+impl Serialize for LensId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.string.as_str())
+    }
+}
 
 impl<'de> Deserialize<'de> for LensId {
     /// Custom deserialization logic for `LensId`.
