@@ -82,7 +82,7 @@ where
 {
     let client = reqwest::Client::new();
     let snowball_id =
-        lens::snowball(id_list, max_depth, search_for, api_key, Some(&client)).await?;
+        lens::snowball(id_list, max_depth, search_for, api_key, Some(&client), None).await?;
 
     let map_capacity = snowball_id.len();
     let score_hashmap = snowball_id.iter().fold(

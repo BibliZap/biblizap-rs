@@ -10,6 +10,7 @@
 
 use super::error::LensError;
 use super::lensid::LensId;
+use async_trait::async_trait;
 use std::collections::HashMap;
 
 #[cfg(feature = "cache-sqlite")]
@@ -48,7 +49,7 @@ pub fn compute_misses<T>(requested: &[LensId], hits: &HashMap<LensId, T>) -> Vec
 ///
 /// This trait is always available (no feature flag required), but implementations
 /// (SqliteBackend, PostgresBackend) require their respective feature flags.
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait CacheBackend: Send + Sync {
     // References (immutable)
 
