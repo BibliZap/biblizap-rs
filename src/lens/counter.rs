@@ -1,6 +1,6 @@
 use super::lensid::LensId;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LensIdCounter {
     hashmap: nohash_hasher::IntMap<LensId, usize>,
 }

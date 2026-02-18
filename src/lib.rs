@@ -70,31 +70,21 @@ impl From<lens::article::Article> for Article {
 ///
 /// A `Result` containing a `HashSet` of unique `Article` structs found
 /// during the snowballing process, or a `Box<dyn Error>` if an error occurs.
-pub async fn snowball<T>(
-    id_list: &[T],
+pub async fn snowball<S>(
+    id_list: &[S],
     max_depth: u8,
     output_max_size: usize,
     search_for: &SearchFor,
     api_key: &str,
 ) -> Result<Vec<Article>, Error>
 where
-    T: AsRef<str>,
+    S: AsRef<str>,
 {
     let client = reqwest::Client::new();
     let snowball_id =
         lens::snowball(id_list, max_depth, search_for, api_key, Some(&client), None).await?;
 
-    let map_capacity = snowball_id.len();
-    let score_hashmap = snowball_id.iter().fold(
-        nohash_hasher::IntMap::<lens::lensid::LensId, i32>::with_capacity_and_hasher(
-            map_capacity,
-            std::hash::BuildHasherDefault::default(),
-        ),
-        |mut m, x| {
-            *m.entry(x.to_owned()).or_default() += 1;
-            m
-        },
-    );
+    let score_hashmap = snowball_id.into_inner();
 
     let mut s = score_hashmap.iter().collect::<Vec<_>>();
     s.sort_by_key(|x| std::cmp::Reverse(x.1));
@@ -114,7 +104,7 @@ where
         .collect::<Vec<(lensid::LensId, Article)>>();
 
     for (k, v) in articles_kv.iter_mut() {
-        v.score = score_hashmap.get(k).copied();
+        v.score = score_hashmap.get(k).map(|x| *x as i32);
     }
 
     let mut articles = articles_kv

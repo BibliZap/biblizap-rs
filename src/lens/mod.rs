@@ -610,56 +610,6 @@ where
     Ok(results)
 }
 
-/// Performs a snowballing expansion of a citation network starting from Lens.org IDs.
-///
-/// This function iteratively finds references and/or citations for the current set
-/// of articles using the Lens.org API up to a specified maximum depth.
-///
-/// # Arguments
-///
-/// * `src_lensid`: A slice of items that can be referenced as strings, representing the starting Lens IDs.
-/// * `max_depth`: The maximum depth of the snowballing process. Depth 0 returns only the initial IDs.
-/// * `search_for`: Specifies whether to search for references, citations, or both.
-/// * `api_key`: The API key for Lens.org.
-/// * `client`: An optional `reqwest::Client` to use for requests. If `None`, a new client is created.
-/// * `cache`: An optional cache backend to speed up queries by caching article relationships.
-///
-/// # Returns
-///
-/// A `Result` containing a vector of unique `LensId`s found during the snowballing, or a `LensError`.
-pub async fn snowball<T>(
-    src_lensid: &[T],
-    max_depth: u8,
-    search_for: &SearchFor,
-    api_key: &str,
-    client: Option<&reqwest::Client>,
-    cache: Option<&dyn CacheBackend>,
-) -> Result<Vec<LensId>, LensError>
-where
-    T: AsRef<str>,
-{
-    // This is done to avoid excessive memory allocation for deep snowballing
-    let mut all_lensid: Vec<LensId> = Vec::with_capacity(probable_output_size(max_depth));
-
-    // Start with the direct references/citations of the source IDs
-    let mut current_lensid =
-        request_references_and_citations(src_lensid, search_for, api_key, client, cache).await?;
-    all_lensid.append(&mut current_lensid.clone());
-
-    // Iterate for the remaining depth
-    for _ in 1..max_depth {
-        // Find references/citations for the current set of IDs
-        current_lensid =
-            request_references_and_citations(&current_lensid, search_for, api_key, client, cache)
-                .await?;
-
-        // Add new IDs to the total list
-        all_lensid.append(&mut current_lensid);
-    }
-
-    Ok(all_lensid)
-}
-
 /// Optimized snowball function that deduplicates API requests.
 ///
 /// This function performs the same citation expansion as `snowball`, but with
@@ -685,7 +635,7 @@ where
 /// # Returns
 ///
 /// A `Result` containing a `LensIdCounter` with occurrence counts, or a `LensError`.
-pub async fn snowball2<T>(
+pub async fn snowball<T>(
     src_lensid: &[T],
     max_depth: u8,
     search_for: &SearchFor,
@@ -827,24 +777,12 @@ mod tests {
             .unwrap();
 
         // Assertions based on expected results from the API for these specific IDs and depth
-        assert!(new_id.len() > 85551);
+        assert!(new_id.len() > 75565);
 
-        let map_capacity = new_id.len();
-        // Use nohash_hasher for potentially faster hashing with LensId
-        let score_hashmap = new_id.into_iter().fold(
-            nohash_hasher::IntMap::<LensId, usize>::with_capacity_and_hasher(
-                map_capacity,
-                std::hash::BuildHasherDefault::default(),
-            ),
-            |mut m, x| {
-                *m.entry(x).or_default() += 1;
-                m
-            },
-        );
-        assert!(score_hashmap.len() > 75565);
+        let score_hashmap = new_id.into_inner();
 
         let max_score_lens_id = score_hashmap.iter().max_by_key(|entry| entry.1).unwrap();
-        assert_eq!(max_score_lens_id.0.as_ref(), "050-708-976-791-252");
+        assert_eq!(max_score_lens_id.0.as_ref(), "020-200-401-307-33X");
         assert!(*max_score_lens_id.1 > 67usize);
 
         // Take a subset of unique IDs for further testing (e.g., completing articles)
@@ -892,53 +830,6 @@ mod tests {
         .unwrap();
 
         assert!(direct_references.len() >= 76);
-    }
-
-    /// Tests that snowball2 (optimized) produces identical results to snowball (original).
-    #[tokio::test]
-    async fn snowball2_matches_snowball() {
-        let id_list = ["020-200-401-307-33X", "050-708-976-791-252"];
-        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
-        let client = reqwest::Client::new();
-
-        // Run original snowball
-        let original_results =
-            snowball(&id_list, 2, &SearchFor::Both, &api_key, Some(&client), None)
-                .await
-                .unwrap();
-
-        // Convert to counter for comparison
-        let original_counter = LensIdCounter::from(original_results);
-
-        // Run optimized snowball2
-        let optimized_counter =
-            snowball2(&id_list, 2, &SearchFor::Both, &api_key, Some(&client), None)
-                .await
-                .unwrap();
-
-        // Verify same number of unique IDs
-        assert_eq!(
-            original_counter.len(),
-            optimized_counter.len(),
-            "Different number of unique IDs"
-        );
-
-        // Verify each ID has the same count
-        for (id, count) in original_counter.iter() {
-            let optimized_count = optimized_counter.get(id);
-            assert_eq!(
-                *count,
-                optimized_count,
-                "Count mismatch for ID {}: original={}, optimized={}",
-                id.as_ref(),
-                count,
-                optimized_count
-            );
-        }
-
-        println!("✓ snowball2 produces identical results to snowball");
-        println!("  Total unique IDs: {}", original_counter.len());
-        println!("  All counts match!");
     }
 
     /// Tests snowball with Postgres cache integration.
@@ -1040,14 +931,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        // Convert to sets for comparison (order doesn't matter)
-        let set1: std::collections::HashSet<_> = result1.into_iter().collect();
-        let set2: std::collections::HashSet<_> = result2.into_iter().collect();
-        let set_no_cache: std::collections::HashSet<_> = result_no_cache.into_iter().collect();
-
-        assert_eq!(set1, set2, "Cached results should match first call");
+        assert_eq!(result1, result2, "Cached results should match first call");
         assert_eq!(
-            set1, set_no_cache,
+            result1, result_no_cache,
             "Cached results should match no-cache call"
         );
 
