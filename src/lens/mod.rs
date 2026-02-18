@@ -228,132 +228,40 @@ async fn request_references_and_citations<T>(
 where
     T: AsRef<str>,
 {
-    // Convert input to LensIds for cache lookup
-    let lens_ids: Vec<LensId> = id_list
-        .iter()
-        .filter_map(|id| LensId::try_from(id.as_ref()).ok())
-        .collect();
-
-    // If no cache, fall back to direct HTTP
-    let Some(cache_backend) = cache else {
-        let output_id = futures::future::join_all(
-            id_list
-                .chunks(1000)
-                .map(|x| request_references_and_citations_chunk(x, search_for, api_key, client)),
+    // If cache is enabled, use the _with_parents variant to preserve relationships
+    if cache.is_some() {
+        let parents_with_children = request_references_and_citations_with_parents(
+            id_list, search_for, api_key, client, cache,
         )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, LensError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .await?;
 
-        if output_id.is_empty() {
-            return Err(LensError::NoArticlesFound);
-        }
+        // Flatten to just the children IDs
+        let results: Vec<LensId> = parents_with_children
+            .into_iter()
+            .flat_map(|pwc| pwc.children)
+            .collect();
 
-        return Ok(output_id);
-    };
-
-    // Query cache based on search_for
-    let (cached_refs, cached_cites) = match search_for {
-        SearchFor::References => {
-            let refs = cache_backend.get_references(&lens_ids).await?;
-            (refs, HashMap::new())
-        }
-        SearchFor::Citations => {
-            let cites = cache_backend.get_citations(&lens_ids).await?;
-            (HashMap::new(), cites)
-        }
-        SearchFor::Both => {
-            let refs = cache_backend.get_references(&lens_ids).await?;
-            let cites = cache_backend.get_citations(&lens_ids).await?;
-            (refs, cites)
-        }
-    };
-
-    // Determine which IDs have complete cache hits
-    let fully_cached_ids: HashSet<LensId> = lens_ids
-        .iter()
-        .filter(|id| match search_for {
-            SearchFor::References => cached_refs.contains_key(id),
-            SearchFor::Citations => cached_cites.contains_key(id),
-            SearchFor::Both => cached_refs.contains_key(id) && cached_cites.contains_key(id),
-        })
-        .cloned()
-        .collect();
-
-    // Build results from cache for fully cached IDs
-    let mut results: Vec<LensId> = fully_cached_ids
-        .iter()
-        .flat_map(|id| match search_for {
-            SearchFor::References => cached_refs.get(id).cloned().unwrap_or_default(),
-            SearchFor::Citations => cached_cites.get(id).cloned().unwrap_or_default(),
-            SearchFor::Both => {
-                let mut all = cached_refs.get(id).cloned().unwrap_or_default();
-                all.extend(cached_cites.get(id).cloned().unwrap_or_default());
-                all
-            }
-        })
-        .collect();
-
-    // Determine which IDs need to be fetched via HTTP (misses)
-    let misses: Vec<LensId> = lens_ids
-        .iter()
-        .filter(|id| !fully_cached_ids.contains(id))
-        .cloned()
-        .collect();
-
-    // Fetch misses from API if any
-    if !misses.is_empty() {
-        let miss_strs: Vec<String> = misses.iter().map(|id| id.as_ref().to_string()).collect();
-        let miss_refs: Vec<&str> = miss_strs.iter().map(|s| s.as_str()).collect();
-
-        let fetched_ids = futures::future::join_all(
-            miss_refs
-                .chunks(1000)
-                .map(|x| request_references_and_citations_chunk(x, search_for, api_key, client)),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, LensError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-
-        // Store fetched results in cache
-        // We need to reconstruct parent->children mapping from the flat list
-        // This is a limitation: we can't perfectly reconstruct which refs/cites came from which parent
-        // For now, we'll store the fetched IDs as if each miss ID references all fetched IDs
-        // This is not ideal but maintains the cache contract
-        if !fetched_ids.is_empty() {
-            let batch: Vec<(LensId, Vec<LensId>)> = misses
-                .iter()
-                .map(|id| (id.clone(), fetched_ids.clone()))
-                .collect();
-
-            match search_for {
-                SearchFor::References => {
-                    cache_backend.store_references(&batch).await?;
-                }
-                SearchFor::Citations => {
-                    cache_backend.store_citations(&batch).await?;
-                }
-                SearchFor::Both => {
-                    cache_backend.store_references(&batch).await?;
-                    cache_backend.store_citations(&batch).await?;
-                }
-            }
-        }
-
-        results.extend(fetched_ids);
+        return Ok(results);
     }
 
-    if results.is_empty() {
+    // No cache - use the original fast path
+    let output_id = futures::future::join_all(
+        id_list
+            .chunks(1000)
+            .map(|x| request_references_and_citations_chunk(x, search_for, api_key, client)),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, LensError>>()?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+
+    if output_id.is_empty() {
         return Err(LensError::NoArticlesFound);
     }
 
-    Ok(results)
+    Ok(output_id)
 }
 
 /// Requests references and/or citations for a chunk of article IDs from the Lens.org API.
@@ -529,6 +437,7 @@ where
     };
 
     // Query cache based on search_for
+    // For SearchFor::Both, we query both tables separately
     let (cached_refs, cached_cites) = match search_for {
         SearchFor::References => {
             let refs = cache_backend.get_references(&lens_ids).await?;
@@ -589,37 +498,103 @@ where
         let miss_strs: Vec<String> = misses.iter().map(|id| id.as_ref().to_string()).collect();
         let miss_refs: Vec<&str> = miss_strs.iter().map(|s| s.as_str()).collect();
 
-        let fetched_results = futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
-            request_references_and_citations_with_parents_chunk(chunk, search_for, api_key, client)
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, LensError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        // For SearchFor::Both, we need to fetch refs and cites separately
+        // so we can store them in the correct cache tables
+        let fetched_results = if matches!(search_for, SearchFor::Both) {
+            // Fetch references
+            let refs_results = futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    &SearchFor::References,
+                    api_key,
+                    client,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
 
-        // Store fetched results in cache
-        if !fetched_results.is_empty() {
-            // Separate references and citations for storage
-            let refs_batch: Vec<(LensId, Vec<LensId>)> = fetched_results
+            // Fetch citations
+            let cites_results = futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    &SearchFor::Citations,
+                    api_key,
+                    client,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+            // Store refs and cites in their respective tables
+            if !refs_results.is_empty() {
+                let refs_batch: Vec<(LensId, Vec<LensId>)> = refs_results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+                cache_backend.store_references(&refs_batch).await?;
+            }
+
+            if !cites_results.is_empty() {
+                let cites_batch: Vec<(LensId, Vec<LensId>)> = cites_results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+                cache_backend.store_citations(&cites_batch).await?;
+            }
+
+            // Combine results - merge refs and cites for the same parent
+            let mut combined_map: HashMap<LensId, Vec<LensId>> = HashMap::new();
+            for pwc in refs_results.into_iter().chain(cites_results.into_iter()) {
+                combined_map
+                    .entry(pwc.parent_id.clone())
+                    .or_default()
+                    .extend(pwc.children);
+            }
+            combined_map
+                .into_iter()
+                .map(|(parent_id, children)| ParentWithChildren {
+                    parent_id,
+                    children,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk, search_for, api_key, client,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+        };
+
+        // Store fetched results in cache (only for References or Citations, not Both)
+        if !fetched_results.is_empty() && !matches!(search_for, SearchFor::Both) {
+            let batch: Vec<(LensId, Vec<LensId>)> = fetched_results
                 .iter()
                 .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
                 .collect();
 
             match search_for {
                 SearchFor::References => {
-                    cache_backend.store_references(&refs_batch).await?;
+                    cache_backend.store_references(&batch).await?;
                 }
                 SearchFor::Citations => {
-                    cache_backend.store_citations(&refs_batch).await?;
+                    cache_backend.store_citations(&batch).await?;
                 }
                 SearchFor::Both => {
-                    // For Both, we need to split the data
-                    // This is a limitation - we can't distinguish refs from cites in ParentWithChildren
-                    // For now, store in both (not ideal, but functional)
-                    cache_backend.store_references(&refs_batch).await?;
-                    cache_backend.store_citations(&refs_batch).await?;
+                    // Already handled in the fetch logic above
                 }
             }
         }
@@ -1020,5 +995,126 @@ mod tests {
         println!("✓ snowball2 produces identical results to snowball");
         println!("  Total unique IDs: {}", original_counter.len());
         println!("  All counts match!");
+    }
+
+    /// Tests snowball with Postgres cache integration.
+    ///
+    /// This test validates:
+    /// 1. First call populates cache (cache miss)
+    /// 2. Second call uses cache (cache hit)
+    /// 3. Results are identical with and without cache
+    #[tokio::test]
+    #[cfg(feature = "cache-postgres")]
+    async fn snowball_with_postgres() {
+        use crate::lens::cache::postgres::PostgresBackend;
+        use std::time::Instant;
+
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
+        let client = reqwest::Client::new();
+        let id_list = ["020-200-401-307-33X", "050-708-976-791-252"];
+
+        // Create test backend with unique schema
+        let db_url = std::env::var("TEST_POSTGRES_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://postgres@localhost/lens_test".to_string());
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        let random = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let schema_name = format!("test_snowball_{timestamp}_{random}");
+
+        // Create schema and backend
+        let pool = sqlx::PgPool::connect(&db_url).await.unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let url_with_schema = format!("{db_url}?options=-c%20search_path%3D{schema_name}");
+        let cache = PostgresBackend::from_url(&url_with_schema)
+            .await
+            .expect("Failed to create cache backend");
+
+        // First call - should hit API and populate cache
+        println!("First snowball call (populating cache)...");
+        let start = Instant::now();
+        let result1 = snowball(
+            &id_list,
+            2,
+            &SearchFor::Both,
+            &api_key,
+            Some(&client),
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        let first_duration = start.elapsed();
+        println!("  Took: {:?}, Found {} IDs", first_duration, result1.len());
+
+        // Second call - should use cache (much faster)
+        println!("Second snowball call (using cache)...");
+        let start = Instant::now();
+        let result2 = snowball(
+            &id_list,
+            2,
+            &SearchFor::Both,
+            &api_key,
+            Some(&client),
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        let cached_duration = start.elapsed();
+        println!("  Took: {:?}, Found {} IDs", cached_duration, result2.len());
+
+        // Results should have same number of IDs
+        assert_eq!(
+            result1.len(),
+            result2.len(),
+            "Cached and uncached results should have same number of IDs"
+        );
+
+        // Cached call should be significantly faster
+        println!(
+            "✓ Cache speedup: {:.2}x faster",
+            first_duration.as_secs_f64() / cached_duration.as_secs_f64()
+        );
+        assert!(
+            cached_duration < first_duration,
+            "Cached call should be faster than first call"
+        );
+
+        // Call without cache for comparison
+        println!("Third call (no cache, for validation)...");
+        let result_no_cache =
+            snowball(&id_list, 2, &SearchFor::Both, &api_key, Some(&client), None)
+                .await
+                .unwrap();
+
+        // Convert to sets for comparison (order doesn't matter)
+        let set1: std::collections::HashSet<_> = result1.into_iter().collect();
+        let set2: std::collections::HashSet<_> = result2.into_iter().collect();
+        let set_no_cache: std::collections::HashSet<_> = result_no_cache.into_iter().collect();
+
+        assert_eq!(set1, set2, "Cached results should match first call");
+        assert_eq!(
+            set1, set_no_cache,
+            "Cached results should match no-cache call"
+        );
+
+        // Cleanup: drop schema
+        let pool = sqlx::PgPool::connect(&db_url).await.unwrap();
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+            .execute(&pool)
+            .await
+            .ok();
+        pool.close().await;
+
+        println!("✓ snowball with Postgres cache works correctly!");
     }
 }
