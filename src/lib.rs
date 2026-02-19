@@ -12,6 +12,8 @@ pub use common::SearchFor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::lens::cache::CacheBackend;
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -76,13 +78,21 @@ pub async fn snowball<S>(
     output_max_size: usize,
     search_for: &SearchFor,
     api_key: &str,
+    cache: Option<&dyn CacheBackend>,
 ) -> Result<Vec<Article>, Error>
 where
     S: AsRef<str>,
 {
     let client = reqwest::Client::new();
-    let snowball_id =
-        lens::snowball(id_list, max_depth, search_for, api_key, Some(&client), None).await?;
+    let snowball_id = lens::snowball(
+        id_list,
+        max_depth,
+        search_for,
+        api_key,
+        Some(&client),
+        cache,
+    )
+    .await?;
 
     let score_hashmap = snowball_id.into_inner();
 
@@ -96,7 +106,8 @@ where
         .to_owned()
         .collect::<Vec<_>>();
 
-    let lens_articles = lens::complete_articles(&selected_id, api_key, Some(&client)).await?;
+    let lens_articles =
+        lens::complete_articles(&selected_id, api_key, Some(&client), cache).await?;
 
     let mut articles_kv = lens_articles
         .into_iter()
