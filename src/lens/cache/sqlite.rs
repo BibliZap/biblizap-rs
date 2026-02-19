@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(result.get(&id2).unwrap(), &refs2);
 
         // Query non-existent ID
-        let result = backend.get_references(&[id3.clone()]).await?;
+        let result = backend.get_references(std::slice::from_ref(&id3)).await?;
         assert_eq!(result.len(), 0);
 
         Ok(())
@@ -469,7 +469,7 @@ mod tests {
             .await?;
 
         // Should still return the original references
-        let result = backend.get_references(&[id1.clone()]).await?;
+        let result = backend.get_references(std::slice::from_ref(&id1)).await?;
         assert_eq!(result.get(&id1).unwrap(), &refs1);
 
         Ok(())
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(result.get(&id2).unwrap(), &cites2);
 
         // Query non-existent ID
-        let result = backend.get_citations(&[id3.clone()]).await?;
+        let result = backend.get_citations(std::slice::from_ref(&id3)).await?;
         assert_eq!(result.len(), 0);
 
         Ok(())
@@ -524,7 +524,7 @@ mod tests {
             .await?;
 
         // Should return the updated citations
-        let result = backend.get_citations(&[id1.clone()]).await?;
+        let result = backend.get_citations(std::slice::from_ref(&id1)).await?;
         assert_eq!(result.get(&id1).unwrap(), &cites2);
 
         Ok(())
@@ -570,8 +570,8 @@ mod tests {
             .await?;
 
         // Verify data exists
-        let refs_result = backend.get_references(&[id1.clone()]).await?;
-        let cites_result = backend.get_citations(&[id2.clone()]).await?;
+        let refs_result = backend.get_references(std::slice::from_ref(&id1)).await?;
+        let cites_result = backend.get_citations(std::slice::from_ref(&id2)).await?;
         assert_eq!(refs_result.len(), 1);
         assert_eq!(cites_result.len(), 1);
 
@@ -579,8 +579,8 @@ mod tests {
         backend.clear().await?;
 
         // Verify data is gone
-        let refs_result = backend.get_references(&[id1.clone()]).await?;
-        let cites_result = backend.get_citations(&[id2.clone()]).await?;
+        let refs_result = backend.get_references(std::slice::from_ref(&id1)).await?;
+        let cites_result = backend.get_citations(std::slice::from_ref(&id2)).await?;
         assert_eq!(refs_result.len(), 0);
         assert_eq!(cites_result.len(), 0);
 
@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(retrieved2.year_published, Some(2024));
 
         // Query non-existent ID
-        let result = backend.get_article_data(&[id3.clone()]).await?;
+        let result = backend.get_article_data(std::slice::from_ref(&id3)).await?;
         assert_eq!(result.len(), 0);
 
         Ok(())
