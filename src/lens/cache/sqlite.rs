@@ -1,5 +1,6 @@
 //! SQLite backend implementation for the Lens cache
 
+use crate::lens::article::Article;
 use crate::lens::error::LensError;
 use crate::lens::lensid::LensId;
 use async_trait::async_trait;
@@ -39,6 +40,21 @@ impl CitationsRow {
             .unwrap_or_default();
 
         Ok((lens_id, citations))
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ArticleRow {
+    pub lens_id: String,
+    pub article_json: String,
+}
+
+impl ArticleRow {
+    fn extract(self) -> Result<(LensId, Article), LensError> {
+        let lens_id = LensId::try_from(self.lens_id.as_str())?;
+        let article: Article = serde_json::from_str(&self.article_json)?;
+
+        Ok((lens_id, article))
     }
 }
 
@@ -209,6 +225,79 @@ impl CacheBackend for SqliteBackend {
         Ok(())
     }
 
+    async fn get_article_data(
+        &self,
+        ids: &[LensId],
+    ) -> Result<HashMap<LensId, Article>, LensError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let ids_json = Self::ids_to_json(ids)?;
+
+        let rows: Vec<ArticleRow> = sqlx::query_as(
+            r#"
+                SELECT lens_id, article_json
+                FROM article_data
+                WHERE lens_id IN (SELECT value FROM json_each(?))
+            "#,
+        )
+        .bind(&ids_json)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|x| x.extract()).collect()
+    }
+
+    async fn store_article_data(&self, batch: &[(LensId, Article)]) -> Result<(), LensError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        const CHUNK_SIZE: usize = 333;
+
+        // Start transaction for all chunks
+        let mut tx = self.pool.begin().await?;
+
+        let rough_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        for chunk in batch.chunks(CHUNK_SIZE) {
+            // Pre-serialize all JSON (handles errors before building query)
+            let rows: Vec<(String, String, i64)> = chunk
+                .iter()
+                .map(|(id, refs)| {
+                    let id_str = id.as_ref().to_string();
+                    let refs_json = serde_json::to_string(refs)?;
+
+                    Ok((id_str, refs_json, rough_timestamp))
+                })
+                .collect::<Result<Vec<_>, LensError>>()?;
+
+            // Build multi-row INSERT
+            let mut builder = sqlx::QueryBuilder::new(
+                "INSERT INTO article_data (lens_id, article_json, fetched_at) ",
+            );
+
+            builder.push_values(rows, |mut b, (id_str, refs_json, timestamp)| {
+                b.push_bind(id_str)
+                    .push_bind(refs_json)
+                    .push_bind(timestamp);
+            });
+
+            // References are immutable, so just ignore conflicts
+            builder.push(" ON CONFLICT (lens_id) DO NOTHING");
+
+            builder.build().execute(&mut *tx).await?;
+        }
+
+        // Commit once at the end (single fsync)
+        tx.commit().await?;
+
+        Ok(())
+    }
+
     async fn clear(&self) -> Result<(), LensError> {
         let mut tx = self.pool.begin().await?;
 
@@ -272,6 +361,18 @@ impl SqliteBackend {
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_citations_fetched ON article_citations(fetched_at)",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS article_data (
+                lens_id TEXT PRIMARY KEY,
+                article_json TEXT NOT NULL,
+                fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
+            ) WITHOUT ROWID
+            "#,
         )
         .execute(pool)
         .await?;
@@ -540,6 +641,82 @@ mod tests {
         assert!(misses.contains(&id4));
         assert!(!misses.contains(&id1));
         assert!(!misses.contains(&id2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_store_and_get_article_data() -> Result<(), LensError> {
+        use crate::lens::article::{Author, ExternalIds, Source};
+
+        let backend = SqliteBackend::from_url("sqlite::memory:").await?;
+
+        // Create test articles
+        let id1 = LensId::from(12345678901234);
+        let id2 = LensId::from(98765432109876);
+        let id3 = LensId::from(11111111111111);
+
+        let article1 = Article {
+            lens_id: id1.clone(),
+            title: Some("Test Article 1".to_string()),
+            summary: Some("This is a test abstract".to_string()),
+            scholarly_citations_count: Some(42),
+            external_ids: Some(ExternalIds {
+                pmid: vec!["12345".to_string()],
+                doi: vec!["10.1234/test".to_string()],
+                coreid: vec![],
+                pmcid: vec![],
+                magid: vec![],
+            }),
+            authors: Some(vec![Author {
+                first_name: Some("John".to_string()),
+                initials: Some("J".to_string()),
+                last_name: Some("Doe".to_string()),
+            }]),
+            source: Some(Source {
+                publisher: Some("Test Publisher".to_string()),
+                title: Some("Test Journal".to_string()),
+                kind: Some("journal".to_string()),
+            }),
+            year_published: Some(2023),
+        };
+
+        let article2 = Article {
+            lens_id: id2.clone(),
+            title: Some("Test Article 2".to_string()),
+            summary: None,
+            scholarly_citations_count: Some(10),
+            external_ids: None,
+            authors: None,
+            source: None,
+            year_published: Some(2024),
+        };
+
+        let batch = vec![(id1.clone(), article1), (id2.clone(), article2)];
+
+        // Store articles
+        backend.store_article_data(&batch).await?;
+
+        // Retrieve articles
+        let result = backend
+            .get_article_data(&[id1.clone(), id2.clone()])
+            .await?;
+
+        assert_eq!(result.len(), 2);
+
+        let retrieved1 = result.get(&id1).unwrap();
+        assert_eq!(retrieved1.title, Some("Test Article 1".to_string()));
+        assert_eq!(retrieved1.scholarly_citations_count, Some(42));
+        assert_eq!(retrieved1.year_published, Some(2023));
+        assert!(retrieved1.external_ids.is_some());
+
+        let retrieved2 = result.get(&id2).unwrap();
+        assert_eq!(retrieved2.title, Some("Test Article 2".to_string()));
+        assert_eq!(retrieved2.year_published, Some(2024));
+
+        // Query non-existent ID
+        let result = backend.get_article_data(&[id3.clone()]).await?;
+        assert_eq!(result.len(), 0);
 
         Ok(())
     }

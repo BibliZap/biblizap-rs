@@ -1,5 +1,6 @@
 //! PostgreSQL backend implementation for the Lens cache
 
+use crate::lens::article::Article;
 use crate::lens::error::LensError;
 use crate::lens::lensid::LensId;
 use async_trait::async_trait;
@@ -39,6 +40,21 @@ impl CitationsRow {
             .unwrap_or_default();
 
         Ok((lens_id, citations))
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ArticleRow {
+    pub lens_id: String,
+    pub article_json: String,
+}
+
+impl ArticleRow {
+    fn extract(self) -> Result<(LensId, Article), LensError> {
+        let lens_id = LensId::try_from(self.lens_id.as_str())?;
+        let article: Article = serde_json::from_str(&self.article_json)?;
+
+        Ok((lens_id, article))
     }
 }
 
@@ -214,6 +230,84 @@ impl CacheBackend for PostgresBackend {
         Ok(())
     }
 
+    async fn get_article_data(
+        &self,
+        ids: &[LensId],
+    ) -> Result<HashMap<LensId, Article>, LensError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // PostgreSQL allows us to use ANY with an array - more efficient than JSON
+        let ids_vec: Vec<String> = ids.iter().map(|id| id.as_ref().to_string()).collect();
+
+        let rows: Vec<ArticleRow> = sqlx::query_as(
+            r#"
+                SELECT lens_id, article_json
+                FROM article_data
+                WHERE lens_id = ANY($1)
+            "#,
+        )
+        .bind(&ids_vec)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|x| x.extract()).collect()
+    }
+
+    async fn store_article_data(&self, batch: &[(LensId, Article)]) -> Result<(), LensError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // PostgreSQL has higher parameter limits, so we can use larger chunks
+        // Postgres default max_prepared_transactions is 32767 parameters
+        // With 3 params per row: 32767 / 3 = ~10922, use 5000 for safety
+        const CHUNK_SIZE: usize = 5000;
+
+        // Start transaction for all chunks
+        let mut tx = self.pool.begin().await?;
+
+        let rough_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        for chunk in batch.chunks(CHUNK_SIZE) {
+            // Pre-serialize all JSON (handles errors before building query)
+            let rows: Vec<(String, String, i64)> = chunk
+                .iter()
+                .map(|(id, articles)| {
+                    let id_str = id.as_ref().to_string();
+                    let articles_json = serde_json::to_string(articles)?;
+
+                    Ok((id_str, articles_json, rough_timestamp))
+                })
+                .collect::<Result<Vec<_>, LensError>>()?;
+
+            // Build multi-row INSERT
+            let mut builder = sqlx::QueryBuilder::new(
+                "INSERT INTO article_data (lens_id, article_json, fetched_at) ",
+            );
+
+            builder.push_values(rows, |mut b, (id_str, refs_json, timestamp)| {
+                b.push_bind(id_str)
+                    .push_bind(refs_json)
+                    .push_bind(timestamp);
+            });
+
+            // References are immutable, so just ignore conflicts
+            builder.push(" ON CONFLICT (lens_id) DO NOTHING");
+
+            builder.build().execute(&mut *tx).await?;
+        }
+
+        // Commit once at the end
+        tx.commit().await?;
+
+        Ok(())
+    }
+
     async fn clear(&self) -> Result<(), LensError> {
         let mut tx = self.pool.begin().await?;
 
@@ -253,7 +347,7 @@ impl PostgresBackend {
     async fn run_migrations(pool: &PgPool) -> Result<(), LensError> {
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS article_references (
+            CREATE UNLOGGED TABLE IF NOT EXISTS article_references (
                 lens_id TEXT PRIMARY KEY,
                 references_json TEXT NOT NULL,
                 fetched_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
@@ -265,7 +359,7 @@ impl PostgresBackend {
 
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS article_citations (
+            CREATE UNLOGGED TABLE IF NOT EXISTS article_citations (
                 lens_id TEXT PRIMARY KEY,
                 citations_json TEXT NOT NULL,
                 fetched_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
@@ -278,6 +372,18 @@ impl PostgresBackend {
         // Create index on fetched_at for citations (useful for TTL queries)
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_citations_fetched ON article_citations(fetched_at)",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE UNLOGGED TABLE IF NOT EXISTS article_data (
+                lens_id TEXT PRIMARY KEY,
+                article_json TEXT NOT NULL,
+                fetched_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+            )
+            "#,
         )
         .execute(pool)
         .await?;
@@ -584,6 +690,82 @@ mod tests {
         assert!(misses.contains(&id4));
         assert!(!misses.contains(&id1));
         assert!(!misses.contains(&id2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_store_and_get_article_data() -> Result<(), LensError> {
+        use crate::lens::article::{Author, ExternalIds, Source};
+
+        let backend = create_test_backend().await?;
+
+        // Create test articles
+        let id1 = LensId::from(12345678901234);
+        let id2 = LensId::from(98765432109876);
+        let id3 = LensId::from(11111111111111);
+
+        let article1 = Article {
+            lens_id: id1.clone(),
+            title: Some("Test Article 1".to_string()),
+            summary: Some("This is a test abstract".to_string()),
+            scholarly_citations_count: Some(42),
+            external_ids: Some(ExternalIds {
+                pmid: vec!["12345".to_string()],
+                doi: vec!["10.1234/test".to_string()],
+                coreid: vec![],
+                pmcid: vec![],
+                magid: vec![],
+            }),
+            authors: Some(vec![Author {
+                first_name: Some("John".to_string()),
+                initials: Some("J".to_string()),
+                last_name: Some("Doe".to_string()),
+            }]),
+            source: Some(Source {
+                publisher: Some("Test Publisher".to_string()),
+                title: Some("Test Journal".to_string()),
+                kind: Some("journal".to_string()),
+            }),
+            year_published: Some(2023),
+        };
+
+        let article2 = Article {
+            lens_id: id2.clone(),
+            title: Some("Test Article 2".to_string()),
+            summary: None,
+            scholarly_citations_count: Some(10),
+            external_ids: None,
+            authors: None,
+            source: None,
+            year_published: Some(2024),
+        };
+
+        let batch = vec![(id1.clone(), article1), (id2.clone(), article2)];
+
+        // Store articles
+        backend.store_article_data(&batch).await?;
+
+        // Retrieve articles
+        let result = backend
+            .get_article_data(&[id1.clone(), id2.clone()])
+            .await?;
+
+        assert_eq!(result.len(), 2);
+
+        let retrieved1 = result.get(&id1).unwrap();
+        assert_eq!(retrieved1.title, Some("Test Article 1".to_string()));
+        assert_eq!(retrieved1.scholarly_citations_count, Some(42));
+        assert_eq!(retrieved1.year_published, Some(2023));
+        assert!(retrieved1.external_ids.is_some());
+
+        let retrieved2 = result.get(&id2).unwrap();
+        assert_eq!(retrieved2.title, Some("Test Article 2".to_string()));
+        assert_eq!(retrieved2.year_published, Some(2024));
+
+        // Query non-existent ID
+        let result = backend.get_article_data(&[id3.clone()]).await?;
+        assert_eq!(result.len(), 0);
 
         Ok(())
     }

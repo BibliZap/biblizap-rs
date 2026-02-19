@@ -8,6 +8,8 @@
 //! - References (outgoing edges): immutable once fetched
 //! - Citations (incoming edges): mutable, need periodic refresh
 
+use crate::lens::Article;
+
 use super::error::LensError;
 use super::lensid::LensId;
 use async_trait::async_trait;
@@ -85,7 +87,10 @@ pub trait CacheBackend: Send + Sync {
     /// are updated (ON CONFLICT DO UPDATE behavior).
     async fn store_citations(&self, batch: &[(LensId, Vec<LensId>)]) -> Result<(), LensError>;
 
-    // Maintenance
+    async fn get_article_data(&self, ids: &[LensId])
+        -> Result<HashMap<LensId, Article>, LensError>;
+
+    async fn store_article_data(&self, batch: &[(LensId, Article)]) -> Result<(), LensError>;
 
     /// Clear all cached data (both references and citations)
     async fn clear(&self) -> Result<(), LensError>;

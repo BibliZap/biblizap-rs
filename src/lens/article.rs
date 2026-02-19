@@ -1,14 +1,13 @@
 use serde::de::{self, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Map;
-use std::marker::PhantomData;
 
 use super::lensid::LensId;
 
 /// Represents an article as returned by the Lens.org API.
 ///
 /// This struct mirrors the structure of the article objects in the Lens.org API response.
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Article {
     /// The Lens.org specific ID for the article.
     pub lens_id: LensId,
@@ -21,6 +20,8 @@ pub struct Article {
     pub scholarly_citations_count: Option<i32>,
 
     /// External identifiers for the article (e.g., DOI, PMID).
+    /// When deserializing from Lens.org API, uses custom visitor to parse array format.
+    #[serde(deserialize_with = "deserialize_external_ids_option")]
     pub external_ids: Option<ExternalIds>,
     /// The list of authors.
     pub authors: Option<Vec<Author>>,
@@ -30,11 +31,11 @@ pub struct Article {
     pub year_published: Option<i32>,
 }
 
-/// Represents external identifiers for an article from the Lens.org API.
+/// Represents external identifiers for an article.
 ///
-/// This struct is used to parse the list of external IDs provided by the API,
-/// which is represented as a list of key-value pairs.
-#[derive(Debug, Default, Clone)]
+/// When stored in cache, this is serialized as a normal struct.
+/// When read from Lens.org API, it's parsed from an array format via custom deserializer.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct ExternalIds {
     /// List of PubMed IDs (PMID).
     pub pmid: Vec<String>,
@@ -49,7 +50,7 @@ pub struct ExternalIds {
 }
 
 /// Represents an author in the Lens.org API response.
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Author {
     /// The first name of the author.
     pub first_name: Option<String>,
@@ -60,7 +61,7 @@ pub struct Author {
 }
 
 /// Represents the source (e.g., journal) in the Lens.org API response.
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Source {
     /// The publisher of the source.
     pub publisher: Option<String>,
@@ -71,38 +72,70 @@ pub struct Source {
     pub kind: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for ExternalIds {
-    /// Custom deserialization logic for `ExternalIds`.
-    ///
-    /// The Lens.org API returns external IDs as a list of objects like
-    /// `{"type": "doi", "value": "..."}`, so this visitor is needed
-    /// to parse them into the structured `ExternalIds` struct.
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let visitor = ExternalIdsVisitor(PhantomData);
-        deserializer.deserialize_seq(visitor)
+/// Custom deserialization function for Option<ExternalIds> that handles both formats.
+///
+/// - API format: `[{"type": "doi", "value": "..."}]` (uses Visitor)
+/// - Cache format: `{"pmid": [...], "doi": [...]}` (normal deserialization)
+fn deserialize_external_ids_option<'de, D>(deserializer: D) -> Result<Option<ExternalIds>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OptionalExternalIdsVisitor;
+
+    impl<'de> Visitor<'de> for OptionalExternalIdsVisitor {
+        type Value = Option<ExternalIds>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(
+                formatter,
+                "null, an object, or an array of external ID objects"
+            )
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(ExternalIdsFlexibleVisitor)
+        }
     }
+
+    deserializer.deserialize_option(OptionalExternalIdsVisitor)
 }
 
-/// A visitor for deserializing the `external_ids` field from the Lens.org API.
-///
-/// This field is returned as a sequence of objects, each with a "type" and "value" field.
-struct ExternalIdsVisitor(PhantomData<fn() -> ExternalIds>);
-impl<'de> Visitor<'de> for ExternalIdsVisitor {
-    type Value = ExternalIds;
+/// A visitor that can handle both API array format and cache object format.
+struct ExternalIdsFlexibleVisitor;
+
+impl<'de> Visitor<'de> for ExternalIdsFlexibleVisitor {
+    type Value = Option<ExternalIds>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(formatter, "a vec of objects with 'type' and 'value' fields")
+        write!(
+            formatter,
+            "an array of external ID objects or a struct with external ID fields"
+        )
     }
 
-    /// Visits a sequence of external ID objects and populates the `ExternalIds` struct.
-    fn visit_seq<V>(self, mut seq: V) -> Result<ExternalIds, V::Error>
+    // Handle API format: array of {"type": "...", "value": "..."}
+    fn visit_seq<V>(self, mut seq: V) -> Result<Self::Value, V::Error>
     where
         V: SeqAccess<'de>,
     {
-        let mut out = ExternalIds::default();
+        let mut result = ExternalIds::default();
         while let Some(value) = seq.next_element()? {
             let map: Map<String, serde_json::Value> = value;
             let value_type = map
@@ -110,40 +143,33 @@ impl<'de> Visitor<'de> for ExternalIdsVisitor {
                 .ok_or_else(|| de::Error::missing_field("type"))?
                 .as_str()
                 .ok_or_else(|| de::Error::custom("failed to get type string"))?;
+
+            let value_str = map
+                .get("value")
+                .ok_or_else(|| de::Error::missing_field("value"))?
+                .as_str()
+                .ok_or_else(|| de::Error::custom("failed to get value string"))?
+                .to_owned();
+
             match value_type {
-                "pmid" => out
-                    .pmid
-                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
-                "doi" => out.doi.push(ExternalIdsVisitor::get_value_field::<V>(map)?),
-                "pmcid" => out
-                    .pmcid
-                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
-                "magid" => out
-                    .magid
-                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
-                "coreid" => out
-                    .coreid
-                    .push(ExternalIdsVisitor::get_value_field::<V>(map)?),
+                "pmid" => result.pmid.push(value_str),
+                "doi" => result.doi.push(value_str),
+                "pmcid" => result.pmcid.push(value_str),
+                "magid" => result.magid.push(value_str),
+                "coreid" => result.coreid.push(value_str),
                 _ => {} // Ignore unknown types
             }
         }
-
-        Ok(out)
+        Ok(Some(result))
     }
-}
 
-impl<'de> ExternalIdsVisitor {
-    /// Helper function to extract the "value" field from an external ID object map.
-    fn get_value_field<V>(map: Map<String, serde_json::Value>) -> Result<String, V::Error>
+    // Handle cache format: normal struct {"pmid": [...], "doi": [...], ...}
+    fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
     where
-        V: SeqAccess<'de>,
+        M: de::MapAccess<'de>,
     {
-        Ok(map
-            .get("value")
-            .ok_or_else(|| de::Error::missing_field("value"))?
-            .as_str()
-            .ok_or_else(|| de::Error::custom("failed to get value string"))?
-            .to_owned())
+        let external_ids = ExternalIds::deserialize(de::value::MapAccessDeserializer::new(map))?;
+        Ok(Some(external_ids))
     }
 }
 
