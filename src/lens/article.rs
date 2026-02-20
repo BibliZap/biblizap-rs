@@ -114,7 +114,9 @@ pub struct Source {
 ///
 /// - API format: `[{"type": "doi", "value": "..."}]` (uses Visitor)
 /// - Cache format: `{"pmid": [...], "doi": [...]}` (normal deserialization)
-fn deserialize_external_ids_option<'de, D>(deserializer: D) -> Result<Option<ExternalIds>, D::Error>
+pub fn deserialize_external_ids_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<ExternalIds>, D::Error>
 where
     D: Deserializer<'de>,
 {

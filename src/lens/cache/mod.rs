@@ -44,25 +44,6 @@ pub fn compute_misses<T>(requested: &[LensId], hits: &HashMap<LensId, T>) -> Vec
         .collect()
 }
 
-/// Computes which string IDs were not found in the cache (misses)
-///
-/// # Arguments
-/// * `requested` - The string IDs that were requested
-/// * `hits` - The IDs that were found in the cache
-///
-/// # Returns
-/// A vector of string IDs that were requested but not found in the cache
-pub fn compute_misses_not_lens_id<T>(
-    requested: &[String],
-    hits: &HashMap<String, T>,
-) -> Vec<String> {
-    requested
-        .iter()
-        .filter(|id| !hits.contains_key(id.as_str()))
-        .cloned()
-        .collect()
-}
-
 /// Trait defining the cache backend interface
 ///
 /// Implementations must be thread-safe (Send + Sync) as they may be used
@@ -89,23 +70,6 @@ pub trait CacheBackend: Send + Sync {
     /// the new data is ignored (ON CONFLICT DO NOTHING behavior).
     async fn store_references(&self, batch: &[(LensId, Vec<LensId>)]) -> Result<(), LensError>;
 
-    /// Retrieve references for non-LensId identifiers (PMID, DOI, etc.)
-    ///
-    /// Returns only the IDs that were found in the cache.
-    async fn get_references_not_lens_id(
-        &self,
-        ids: &[String],
-    ) -> Result<HashMap<String, Vec<LensId>>, LensError>;
-
-    /// Store references for non-LensId identifiers (PMID, DOI, etc.)
-    ///
-    /// References are immutable - if an ID already exists in the cache,
-    /// the new data is ignored (ON CONFLICT DO NOTHING behavior).
-    async fn store_references_not_lens_id(
-        &self,
-        batch: &[(String, Vec<LensId>)],
-    ) -> Result<(), LensError>;
-
     // Citations (with TTL) - LensId optimized methods
 
     /// Retrieve citations (incoming edges) for the given article IDs (LensId)
@@ -122,23 +86,6 @@ pub trait CacheBackend: Send + Sync {
     /// Citations are mutable - if an ID already exists, the data and timestamp
     /// are updated (ON CONFLICT DO UPDATE behavior).
     async fn store_citations(&self, batch: &[(LensId, Vec<LensId>)]) -> Result<(), LensError>;
-
-    /// Retrieve citations for non-LensId identifiers (PMID, DOI, etc.)
-    ///
-    /// Returns citations as LensIds.
-    async fn get_citations_not_lens_id(
-        &self,
-        ids: &[String],
-    ) -> Result<HashMap<String, Vec<LensId>>, LensError>;
-
-    /// Store citations for non-LensId identifiers (PMID, DOI, etc.)
-    ///
-    /// Citations are mutable - if an ID already exists, the data and timestamp
-    /// are updated (ON CONFLICT DO UPDATE behavior).
-    async fn store_citations_not_lens_id(
-        &self,
-        batch: &[(String, Vec<LensId>)],
-    ) -> Result<(), LensError>;
 
     // Article data
 

@@ -2,6 +2,7 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::marker::PhantomData;
 
+use super::article::{ExternalIds, deserialize_external_ids_option};
 use super::lensid::LensId;
 
 /// Maximum number of citations/references to deserialize per article.
@@ -172,4 +173,7 @@ pub struct ArticleWithReferencesAndCitations {
     pub lens_id: LensId,
     #[serde(flatten)]
     pub refs_and_cites: ReferencesAndCitations,
+    /// External IDs (PMID, DOI, etc.) - needed for ID mapping when querying by non-LensId
+    #[serde(default, deserialize_with = "deserialize_external_ids_option")]
+    pub external_ids: Option<ExternalIds>,
 }
