@@ -256,11 +256,18 @@ async fn request_references_and_citations_with_parents<T>(
 where
     T: AsRef<str>,
 {
-    // Convert input to LensIds for cache lookup
-    let lens_ids: Vec<LensId> = id_list
-        .iter()
-        .filter_map(|id| LensId::try_from(id.as_ref()).ok())
-        .collect();
+    // Separate LensIds from non-LensIds (PMID, DOI, etc.)
+    let mut lens_ids: Vec<LensId> = Vec::new();
+    let mut non_lens_ids: Vec<String> = Vec::new();
+
+    for id in id_list {
+        let id_str = id.as_ref();
+        if let Ok(lens_id) = LensId::try_from(id_str) {
+            lens_ids.push(lens_id);
+        } else {
+            non_lens_ids.push(id_str.to_string());
+        }
+    }
 
     // If no cache, fall back to direct HTTP
     let Some(cache_backend) = cache else {
@@ -281,9 +288,8 @@ where
         return Ok(all_results);
     };
 
-    // Query cache based on search_for
-    // For SearchFor::Both, we query both tables separately
-    let (cached_refs, cached_cites) = match search_for {
+    // Query cache for LensIds
+    let (cached_refs_lens, cached_cites_lens) = match search_for {
         SearchFor::References => {
             let refs = cache_backend.get_references(&lens_ids).await?;
             (refs, HashMap::new())
@@ -299,27 +305,67 @@ where
         }
     };
 
-    // Determine which IDs have complete cache hits
-    let fully_cached_ids: HashSet<LensId> = lens_ids
+    // Query cache for non-LensIds (PMID, DOI, etc.)
+    let (cached_refs_non_lens, cached_cites_non_lens) = match search_for {
+        SearchFor::References => {
+            let refs = cache_backend
+                .get_references_not_lens_id(&non_lens_ids)
+                .await?;
+            (refs, HashMap::new())
+        }
+        SearchFor::Citations => {
+            let cites = cache_backend
+                .get_citations_not_lens_id(&non_lens_ids)
+                .await?;
+            (HashMap::new(), cites)
+        }
+        SearchFor::Both => {
+            let refs = cache_backend
+                .get_references_not_lens_id(&non_lens_ids)
+                .await?;
+            let cites = cache_backend
+                .get_citations_not_lens_id(&non_lens_ids)
+                .await?;
+            (refs, cites)
+        }
+    };
+
+    // Determine which LensIds have complete cache hits
+    let fully_cached_lens_ids: HashSet<LensId> = lens_ids
         .iter()
         .filter(|id| match search_for {
-            SearchFor::References => cached_refs.contains_key(id),
-            SearchFor::Citations => cached_cites.contains_key(id),
-            SearchFor::Both => cached_refs.contains_key(id) && cached_cites.contains_key(id),
+            SearchFor::References => cached_refs_lens.contains_key(id),
+            SearchFor::Citations => cached_cites_lens.contains_key(id),
+            SearchFor::Both => {
+                cached_refs_lens.contains_key(id) && cached_cites_lens.contains_key(id)
+            }
         })
         .cloned()
         .collect();
 
-    // Build results from cache for fully cached IDs
-    let mut results: Vec<ParentWithChildren> = fully_cached_ids
+    // Determine which non-LensIds have complete cache hits
+    let fully_cached_non_lens_ids: HashSet<String> = non_lens_ids
+        .iter()
+        .filter(|id| match search_for {
+            SearchFor::References => cached_refs_non_lens.contains_key(*id),
+            SearchFor::Citations => cached_cites_non_lens.contains_key(*id),
+            SearchFor::Both => {
+                cached_refs_non_lens.contains_key(*id) && cached_cites_non_lens.contains_key(*id)
+            }
+        })
+        .cloned()
+        .collect();
+
+    // Build results from cache for LensIds
+    let mut results: Vec<ParentWithChildren> = fully_cached_lens_ids
         .iter()
         .map(|id| {
             let children = match search_for {
-                SearchFor::References => cached_refs.get(id).cloned().unwrap_or_default(),
-                SearchFor::Citations => cached_cites.get(id).cloned().unwrap_or_default(),
+                SearchFor::References => cached_refs_lens.get(id).cloned().unwrap_or_default(),
+                SearchFor::Citations => cached_cites_lens.get(id).cloned().unwrap_or_default(),
                 SearchFor::Both => {
-                    let mut refs = cached_refs.get(id).cloned().unwrap_or_default();
-                    let mut cites = cached_cites.get(id).cloned().unwrap_or_default();
+                    let mut refs = cached_refs_lens.get(id).cloned().unwrap_or_default();
+                    let mut cites = cached_cites_lens.get(id).cloned().unwrap_or_default();
                     refs.append(&mut cites);
                     refs
                 }
@@ -331,17 +377,67 @@ where
         })
         .collect();
 
+    // Add results from cache for non-LensIds
+    for id_str in &fully_cached_non_lens_ids {
+        // Convert string ID to LensId - we need to fetch from API to get the LensId
+        // For now, we'll just use the children directly
+        let children = match search_for {
+            SearchFor::References => cached_refs_non_lens
+                .get(id_str)
+                .cloned()
+                .unwrap_or_default(),
+            SearchFor::Citations => cached_cites_non_lens
+                .get(id_str)
+                .cloned()
+                .unwrap_or_default(),
+            SearchFor::Both => {
+                let mut refs = cached_refs_non_lens
+                    .get(id_str)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut cites = cached_cites_non_lens
+                    .get(id_str)
+                    .cloned()
+                    .unwrap_or_default();
+                refs.append(&mut cites);
+                refs
+            }
+        };
+
+        // We need to convert the string ID to a LensId for ParentWithChildren
+        // If we can't parse it as LensId, we need to skip it (it will be fetched from API)
+        if let Ok(parent_id) = LensId::try_from(id_str.as_str()) {
+            results.push(ParentWithChildren {
+                parent_id,
+                children,
+            });
+        }
+    }
+
     // Determine which IDs need to be fetched via HTTP (misses)
-    let misses: Vec<LensId> = lens_ids
+    let lens_id_misses: Vec<LensId> = lens_ids
         .iter()
-        .filter(|id| !fully_cached_ids.contains(id))
+        .filter(|id| !fully_cached_lens_ids.contains(id))
         .cloned()
         .collect();
 
+    let non_lens_id_misses: Vec<String> = non_lens_ids
+        .iter()
+        .filter(|id| !fully_cached_non_lens_ids.contains(id.as_str()))
+        .cloned()
+        .collect();
+
+    // Combine misses for API fetch
+    let mut all_misses: Vec<String> = lens_id_misses
+        .iter()
+        .map(|id| id.as_ref().to_string())
+        .collect();
+    all_misses.extend(non_lens_id_misses);
+    let misses = all_misses;
+
     // Fetch misses from API if any
     if !misses.is_empty() {
-        let miss_strs: Vec<String> = misses.iter().map(|id| id.as_ref().to_string()).collect();
-        let miss_refs: Vec<&str> = miss_strs.iter().map(|s| s.as_str()).collect();
+        let miss_refs: Vec<&str> = misses.iter().map(|s| s.as_str()).collect();
 
         // For SearchFor::Both, we need to fetch refs and cites separately
         // so we can store them in the correct cache tables
@@ -379,20 +475,57 @@ where
             .collect::<Vec<_>>();
 
             // Store refs and cites in their respective tables
+            // Separate LensIds from non-LensIds for storage
             if !refs_results.is_empty() {
-                let refs_batch: Vec<(LensId, Vec<LensId>)> = refs_results
-                    .iter()
+                let (refs_batch_lens, refs_batch_non_lens): (Vec<_>, Vec<_>) =
+                    refs_results.iter().partition(|pwc| {
+                        // Check if parent_id is in original lens_ids list
+                        lens_ids.contains(&pwc.parent_id)
+                    });
+
+                let refs_lens: Vec<(LensId, Vec<LensId>)> = refs_batch_lens
+                    .into_iter()
                     .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
                     .collect();
-                cache_backend.store_references(&refs_batch).await?;
+
+                let refs_non_lens: Vec<(String, Vec<LensId>)> = refs_batch_non_lens
+                    .into_iter()
+                    .map(|pwc| (pwc.parent_id.as_ref().to_string(), pwc.children.clone()))
+                    .collect();
+
+                if !refs_lens.is_empty() {
+                    cache_backend.store_references(&refs_lens).await?;
+                }
+                if !refs_non_lens.is_empty() {
+                    cache_backend
+                        .store_references_not_lens_id(&refs_non_lens)
+                        .await?;
+                }
             }
 
             if !cites_results.is_empty() {
-                let cites_batch: Vec<(LensId, Vec<LensId>)> = cites_results
+                let (cites_batch_lens, cites_batch_non_lens): (Vec<_>, Vec<_>) = cites_results
                     .iter()
+                    .partition(|pwc| lens_ids.contains(&pwc.parent_id));
+
+                let cites_lens: Vec<(LensId, Vec<LensId>)> = cites_batch_lens
+                    .into_iter()
                     .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
                     .collect();
-                cache_backend.store_citations(&cites_batch).await?;
+
+                let cites_non_lens: Vec<(String, Vec<LensId>)> = cites_batch_non_lens
+                    .into_iter()
+                    .map(|pwc| (pwc.parent_id.as_ref().to_string(), pwc.children.clone()))
+                    .collect();
+
+                if !cites_lens.is_empty() {
+                    cache_backend.store_citations(&cites_lens).await?;
+                }
+                if !cites_non_lens.is_empty() {
+                    cache_backend
+                        .store_citations_not_lens_id(&cites_non_lens)
+                        .await?;
+                }
             }
 
             // Combine results - merge refs and cites for the same parent
@@ -426,17 +559,40 @@ where
 
         // Store fetched results in cache (only for References or Citations, not Both)
         if !fetched_results.is_empty() && !matches!(search_for, SearchFor::Both) {
-            let batch: Vec<(LensId, Vec<LensId>)> = fetched_results
+            let (batch_lens, batch_non_lens): (Vec<_>, Vec<_>) = fetched_results
                 .iter()
+                .partition(|pwc| lens_ids.contains(&pwc.parent_id));
+
+            let lens_batch: Vec<(LensId, Vec<LensId>)> = batch_lens
+                .into_iter()
                 .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                .collect();
+
+            let non_lens_batch: Vec<(String, Vec<LensId>)> = batch_non_lens
+                .into_iter()
+                .map(|pwc| (pwc.parent_id.as_ref().to_string(), pwc.children.clone()))
                 .collect();
 
             match search_for {
                 SearchFor::References => {
-                    cache_backend.store_references(&batch).await?;
+                    if !lens_batch.is_empty() {
+                        cache_backend.store_references(&lens_batch).await?;
+                    }
+                    if !non_lens_batch.is_empty() {
+                        cache_backend
+                            .store_references_not_lens_id(&non_lens_batch)
+                            .await?;
+                    }
                 }
                 SearchFor::Citations => {
-                    cache_backend.store_citations(&batch).await?;
+                    if !lens_batch.is_empty() {
+                        cache_backend.store_citations(&lens_batch).await?;
+                    }
+                    if !non_lens_batch.is_empty() {
+                        cache_backend
+                            .store_citations_not_lens_id(&non_lens_batch)
+                            .await?;
+                    }
                 }
                 SearchFor::Both => {
                     // Already handled in the fetch logic above
@@ -832,5 +988,66 @@ mod tests {
         pool.close().await;
 
         println!("✓ snowball with Postgres cache works correctly!");
+    }
+
+    /// Test that requests citations and references for a PMID twice with cache.
+    /// This should expose a bug where PMIDs are not properly converted to LensIds
+    /// before cache lookup, causing the second request to fail or return incorrect results.
+    #[tokio::test]
+    async fn test_pmid_twice_with_cache() {
+        use crate::lens::cache::sqlite::SqliteBackend;
+
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
+        let client = reqwest::Client::new();
+
+        // Use PMID as input (not a LensId)
+        let pmid = "30507730";
+        let id_list = [pmid];
+
+        // Create in-memory SQLite cache
+        let cache = SqliteBackend::from_url("sqlite::memory:")
+            .await
+            .expect("Failed to create cache backend");
+
+        // First call - should hit API and populate cache
+        println!("First snowball call with PMID (populating cache)...");
+        let result1 = snowball(
+            &id_list,
+            1,
+            &SearchFor::Both,
+            &api_key,
+            Some(&client),
+            Some(&cache),
+        )
+        .await
+        .expect("First snowball call failed");
+
+        println!("  Found {} IDs", result1.len());
+        assert!(result1.len() > 0, "Should find some results on first call");
+
+        // Second call - should use cache
+        println!("Second snowball call with PMID (using cache)...");
+        let result2 = snowball(
+            &id_list,
+            1,
+            &SearchFor::Both,
+            &api_key,
+            Some(&client),
+            Some(&cache),
+        )
+        .await
+        .expect("Second snowball call failed");
+
+        println!("  Found {} IDs", result2.len());
+
+        // Results should be identical
+        assert_eq!(
+            result1.len(),
+            result2.len(),
+            "Cached and uncached results should have same number of IDs"
+        );
+        assert_eq!(result1, result2, "Cached results should match first call");
+
+        println!("✓ PMID can be requested twice with cache!");
     }
 }

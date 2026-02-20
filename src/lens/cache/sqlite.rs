@@ -24,6 +24,14 @@ impl ReferencesRow {
 
         Ok((lens_id, relationships))
     }
+
+    fn extract_string(self) -> Result<(String, Vec<LensId>), LensError> {
+        let relationships: Vec<LensId> = serde_json::from_str(&self.references_json)
+            .ok()
+            .unwrap_or_default();
+
+        Ok((self.lens_id, relationships))
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -41,6 +49,14 @@ impl CitationsRow {
 
         Ok((lens_id, citations))
     }
+
+    fn extract_string(self) -> Result<(String, Vec<LensId>), LensError> {
+        let citations: Vec<LensId> = serde_json::from_str(&self.citations_json)
+            .ok()
+            .unwrap_or_default();
+
+        Ok((self.lens_id, citations))
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -55,6 +71,12 @@ impl ArticleRow {
         let article: Article = serde_json::from_str(&self.article_json)?;
 
         Ok((lens_id, article))
+    }
+
+    fn extract_string(self) -> Result<(String, Article), LensError> {
+        let article: Article = serde_json::from_str(&self.article_json)?;
+
+        Ok((self.lens_id, article))
     }
 }
 
@@ -298,6 +320,220 @@ impl CacheBackend for SqliteBackend {
         Ok(())
     }
 
+    // Non-LensId methods (for user input: PMID, DOI, etc.)
+
+    async fn get_references_not_lens_id(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<LensId>>, LensError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let ids_json = serde_json::to_string(ids)?;
+
+        let rows: Vec<ReferencesRow> = sqlx::query_as(
+            r#"
+                SELECT string_id as lens_id, references_json
+                FROM article_references_not_lens_id
+                WHERE string_id IN (SELECT value FROM json_each(?))
+            "#,
+        )
+        .bind(&ids_json)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|x| x.extract_string()).collect()
+    }
+
+    async fn store_references_not_lens_id(
+        &self,
+        batch: &[(String, Vec<LensId>)],
+    ) -> Result<(), LensError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        const CHUNK_SIZE: usize = 333;
+
+        let mut tx = self.pool.begin().await?;
+
+        let rough_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        for chunk in batch.chunks(CHUNK_SIZE) {
+            let rows: Vec<(String, String, i64)> = chunk
+                .iter()
+                .map(|(id, refs)| {
+                    let refs_json = serde_json::to_string(refs)?;
+                    Ok((id.clone(), refs_json, rough_timestamp))
+                })
+                .collect::<Result<Vec<_>, LensError>>()?;
+
+            let mut builder = sqlx::QueryBuilder::new(
+                "INSERT INTO article_references_not_lens_id (string_id, references_json, fetched_at) ",
+            );
+
+            builder.push_values(rows, |mut b, (id_str, refs_json, timestamp)| {
+                b.push_bind(id_str)
+                    .push_bind(refs_json)
+                    .push_bind(timestamp);
+            });
+
+            builder.push(" ON CONFLICT (string_id) DO NOTHING");
+
+            builder.build().execute(&mut *tx).await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(())
+    }
+
+    async fn get_citations_not_lens_id(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<LensId>>, LensError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let ids_json = serde_json::to_string(ids)?;
+
+        let rows: Vec<CitationsRow> = sqlx::query_as(
+            r#"
+                SELECT string_id as lens_id, citations_json
+                FROM article_citations_not_lens_id
+                WHERE string_id IN (SELECT value FROM json_each(?))
+            "#,
+        )
+        .bind(&ids_json)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|x| x.extract_string()).collect()
+    }
+
+    async fn store_citations_not_lens_id(
+        &self,
+        batch: &[(String, Vec<LensId>)],
+    ) -> Result<(), LensError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        const CHUNK_SIZE: usize = 333;
+
+        let mut tx = self.pool.begin().await?;
+
+        let rough_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        for chunk in batch.chunks(CHUNK_SIZE) {
+            let rows: Vec<(String, String, i64)> = chunk
+                .iter()
+                .map(|(id, citations)| {
+                    let citations_json = serde_json::to_string(citations)?;
+                    Ok((id.clone(), citations_json, rough_timestamp))
+                })
+                .collect::<Result<Vec<_>, LensError>>()?;
+
+            let mut builder = sqlx::QueryBuilder::new(
+                "INSERT INTO article_citations_not_lens_id (string_id, citations_json, fetched_at) ",
+            );
+
+            builder.push_values(rows, |mut b, (id_str, citations_json, timestamp)| {
+                b.push_bind(id_str)
+                    .push_bind(citations_json)
+                    .push_bind(timestamp);
+            });
+
+            builder.push(
+                " ON CONFLICT (string_id) DO UPDATE SET citations_json = excluded.citations_json, fetched_at = excluded.fetched_at",
+            );
+
+            builder.build().execute(&mut *tx).await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(())
+    }
+
+    async fn get_article_data_not_lens_id(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Article>, LensError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let ids_json = serde_json::to_string(ids)?;
+
+        let rows: Vec<ArticleRow> = sqlx::query_as(
+            r#"
+                SELECT string_id as lens_id, article_json
+                FROM article_data_not_lens_id
+                WHERE string_id IN (SELECT value FROM json_each(?))
+            "#,
+        )
+        .bind(&ids_json)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|x| x.extract_string()).collect()
+    }
+
+    async fn store_article_data_not_lens_id(
+        &self,
+        batch: &[(String, Article)],
+    ) -> Result<(), LensError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        const CHUNK_SIZE: usize = 333;
+
+        let mut tx = self.pool.begin().await?;
+
+        let rough_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        for chunk in batch.chunks(CHUNK_SIZE) {
+            let rows: Vec<(String, String, i64)> = chunk
+                .iter()
+                .map(|(id, article)| {
+                    let article_json = serde_json::to_string(article)?;
+                    Ok((id.clone(), article_json, rough_timestamp))
+                })
+                .collect::<Result<Vec<_>, LensError>>()?;
+
+            let mut builder = sqlx::QueryBuilder::new(
+                "INSERT INTO article_data_not_lens_id (string_id, article_json, fetched_at) ",
+            );
+
+            builder.push_values(rows, |mut b, (id_str, article_json, timestamp)| {
+                b.push_bind(id_str)
+                    .push_bind(article_json)
+                    .push_bind(timestamp);
+            });
+
+            builder.push(" ON CONFLICT (string_id) DO NOTHING");
+
+            builder.build().execute(&mut *tx).await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(())
+    }
+
     async fn clear(&self) -> Result<(), LensError> {
         let mut tx = self.pool.begin().await?;
 
@@ -306,6 +542,22 @@ impl CacheBackend for SqliteBackend {
             .await?;
 
         sqlx::query("DELETE FROM article_citations")
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM article_references_not_lens_id")
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM article_citations_not_lens_id")
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM article_data")
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM article_data_not_lens_id")
             .execute(&mut *tx)
             .await?;
 
@@ -335,6 +587,7 @@ impl SqliteBackend {
 
     /// Run database migrations (creates tables if they don't exist)
     async fn run_migrations(pool: &SqlitePool) -> Result<(), LensError> {
+        // LensId tables (optimized with NoHasher)
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS article_references (
@@ -372,6 +625,49 @@ impl SqliteBackend {
                 article_json TEXT NOT NULL,
                 fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
             ) WITHOUT ROWID
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Non-LensId tables (for user input: PMID, DOI, etc.)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS article_references_not_lens_id (
+                string_id TEXT PRIMARY KEY,
+                references_json TEXT NOT NULL,
+                fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS article_citations_not_lens_id (
+                string_id TEXT PRIMARY KEY,
+                citations_json TEXT NOT NULL,
+                fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_citations_not_lens_id_fetched ON article_citations_not_lens_id(fetched_at)",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS article_data_not_lens_id (
+                string_id TEXT PRIMARY KEY,
+                article_json TEXT NOT NULL,
+                fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
+            )
             "#,
         )
         .execute(pool)
