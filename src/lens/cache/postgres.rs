@@ -468,6 +468,78 @@ impl CacheBackend for PostgresBackend {
         Ok(())
     }
 
+    async fn get_id_mapping(
+        &self,
+        string_ids: &[String],
+    ) -> Result<HashMap<String, LensId>, LensError> {
+        if string_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let ids_vec: Vec<String> = string_ids.to_vec();
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"
+                SELECT string_id, lens_id
+                FROM id_mappings
+                WHERE string_id = ANY($1)
+            "#,
+        )
+        .bind(&ids_vec)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(string_id, lens_id_str)| {
+                let lens_id = LensId::try_from(lens_id_str.as_str())?;
+                Ok((string_id, lens_id))
+            })
+            .collect()
+    }
+
+    async fn store_id_mapping(&self, batch: &[(String, LensId)]) -> Result<(), LensError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        const CHUNK_SIZE: usize = 5000;
+
+        let mut tx = self.pool.begin().await?;
+
+        let rough_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        for chunk in batch.chunks(CHUNK_SIZE) {
+            let rows: Vec<(String, String, i64)> = chunk
+                .iter()
+                .map(|(string_id, lens_id)| {
+                    let lens_id_str = lens_id.as_ref().to_string();
+                    (string_id.clone(), lens_id_str, rough_timestamp)
+                })
+                .collect();
+
+            let mut builder = sqlx::QueryBuilder::new(
+                "INSERT INTO id_mappings (string_id, lens_id, fetched_at) ",
+            );
+
+            builder.push_values(rows, |mut b, (string_id, lens_id_str, timestamp)| {
+                b.push_bind(string_id)
+                    .push_bind(lens_id_str)
+                    .push_bind(timestamp);
+            });
+
+            builder.push(" ON CONFLICT (string_id) DO NOTHING");
+
+            builder.build().execute(&mut *tx).await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(())
+    }
+
     async fn clear(&self) -> Result<(), LensError> {
         let mut tx = self.pool.begin().await?;
 
@@ -492,6 +564,10 @@ impl CacheBackend for PostgresBackend {
             .await?;
 
         sqlx::query("DELETE FROM article_data_not_lens_id")
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM id_mappings")
             .execute(&mut *tx)
             .await?;
 
@@ -602,6 +678,19 @@ impl PostgresBackend {
             CREATE TABLE IF NOT EXISTS article_data_not_lens_id (
                 string_id TEXT PRIMARY KEY,
                 article_json TEXT NOT NULL,
+                fetched_at BIGINT NOT NULL DEFAULT extract(epoch from now())
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ID mappings table (PMID/DOI/etc → LensId)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS id_mappings (
+                string_id TEXT PRIMARY KEY,
+                lens_id TEXT NOT NULL,
                 fetched_at BIGINT NOT NULL DEFAULT extract(epoch from now())
             )
             "#,
@@ -1004,6 +1093,54 @@ mod tests {
         // Query non-existent ID
         let result = backend.get_article_data(std::slice::from_ref(&id3)).await?;
         assert_eq!(result.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_store_and_get_id_mapping() -> Result<(), LensError> {
+        let backend = create_test_backend().await?;
+
+        let lens_id1 = LensId::from(12345678901234);
+        let lens_id2 = LensId::from(98765432109876);
+        let lens_id3 = LensId::from(11111111111111);
+
+        // Store mappings from various string IDs to LensIds (raw IDs without type prefixes)
+        let mappings = vec![
+            ("12345".to_string(), lens_id1.clone()),        // PMID
+            ("10.1234/test".to_string(), lens_id2.clone()), // DOI
+            ("10.5678/foo".to_string(), lens_id2.clone()),  // Same LensId, different DOI
+        ];
+
+        backend.store_id_mapping(&mappings).await?;
+
+        // Retrieve mappings
+        let string_ids = vec![
+            "12345".to_string(),
+            "10.1234/test".to_string(),
+            "10.5678/foo".to_string(),
+            "99999".to_string(), // Not stored
+        ];
+
+        let result = backend.get_id_mapping(&string_ids).await?;
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get("12345"), Some(&lens_id1));
+        assert_eq!(result.get("10.1234/test"), Some(&lens_id2));
+        assert_eq!(result.get("10.5678/foo"), Some(&lens_id2));
+        assert_eq!(result.get("99999"), None);
+
+        // Test immutability - try to update an existing mapping
+        let update_attempt = vec![("12345".to_string(), lens_id3.clone())];
+        backend.store_id_mapping(&update_attempt).await?;
+
+        // Verify it wasn't updated (ON CONFLICT DO NOTHING)
+        let result_after = backend.get_id_mapping(&["12345".to_string()]).await?;
+        assert_eq!(result_after.get("12345"), Some(&lens_id1)); // Still the original
+
+        // Test empty input
+        let empty_result = backend.get_id_mapping(&[]).await?;
+        assert_eq!(empty_result.len(), 0);
 
         Ok(())
     }

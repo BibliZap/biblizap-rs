@@ -152,6 +152,46 @@ pub trait CacheBackend: Send + Sync {
     /// Accepts a slice of ArticleWithData structs to store in cache.
     async fn store_article_data(&self, batch: &[ArticleWithData]) -> Result<(), LensError>;
 
+    // ID Mappings (PMID/DOI/etc → LensId)
+
+    /// Retrieve LensId mappings for string identifiers (PMID, DOI, etc.)
+    ///
+    /// Given a list of raw string IDs (e.g., "12345", "10.1234/foo"),
+    /// returns a HashMap of those IDs mapped to their corresponding LensIds.
+    ///
+    /// Note: IDs are stored as raw strings without type prefixes. Users provide
+    /// "12345" not "PMID:12345", and "10.1234/foo" not "DOI:10.1234/foo".
+    ///
+    /// This allows resolving user-provided IDs (PMIDs, DOIs) to LensIds,
+    /// which can then be used to query the main LensId-keyed cache tables.
+    ///
+    /// # Arguments
+    /// * `string_ids` - Slice of raw string identifiers to look up (without type prefixes)
+    ///
+    /// # Returns
+    /// A HashMap mapping found string IDs to their LensIds. IDs not found in
+    /// the cache are simply not included in the result.
+    async fn get_id_mapping(
+        &self,
+        string_ids: &[String],
+    ) -> Result<HashMap<String, LensId>, LensError>;
+
+    /// Store ID mappings from string identifiers to LensIds
+    ///
+    /// Stores mappings from user-provided raw IDs (e.g., "12345", "10.1234/foo")
+    /// to their canonical LensIds. This enables fast resolution of string IDs to
+    /// LensIds without needing to query the Lens API.
+    ///
+    /// Note: Store IDs as raw strings without type prefixes. For example,
+    /// store "12345" not "PMID:12345", and "10.1234/foo" not "DOI:10.1234/foo".
+    ///
+    /// Mappings are immutable - if a mapping already exists, it is not updated
+    /// (ON CONFLICT DO NOTHING behavior).
+    ///
+    /// # Arguments
+    /// * `batch` - Slice of (raw_string_id, lens_id) tuples to store
+    async fn store_id_mapping(&self, batch: &[(String, LensId)]) -> Result<(), LensError>;
+
     /// Clear all cached data (both references and citations)
     async fn clear(&self) -> Result<(), LensError>;
 }
