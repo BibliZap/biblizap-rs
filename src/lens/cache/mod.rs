@@ -8,7 +8,7 @@
 //! - References (outgoing edges): immutable once fetched
 //! - Citations (incoming edges): mutable, need periodic refresh
 
-use crate::lens::Article;
+use crate::lens::article::ArticleWithData;
 
 use super::error::LensError;
 use super::lensid::LensId;
@@ -142,20 +142,15 @@ pub trait CacheBackend: Send + Sync {
 
     // Article data
 
-    async fn get_article_data(&self, ids: &[LensId])
-    -> Result<HashMap<LensId, Article>, LensError>;
+    /// Retrieve article data for the given LensIds
+    ///
+    /// Returns a Vec of ArticleWithData structs for articles found in cache.
+    async fn get_article_data(&self, ids: &[LensId]) -> Result<Vec<ArticleWithData>, LensError>;
 
-    async fn store_article_data(&self, batch: &[(LensId, Article)]) -> Result<(), LensError>;
-
-    async fn get_article_data_not_lens_id(
-        &self,
-        ids: &[String],
-    ) -> Result<HashMap<String, Article>, LensError>;
-
-    async fn store_article_data_not_lens_id(
-        &self,
-        batch: &[(String, Article)],
-    ) -> Result<(), LensError>;
+    /// Store article data for LensIds
+    ///
+    /// Accepts a slice of ArticleWithData structs to store in cache.
+    async fn store_article_data(&self, batch: &[ArticleWithData]) -> Result<(), LensError>;
 
     /// Clear all cached data (both references and citations)
     async fn clear(&self) -> Result<(), LensError>;

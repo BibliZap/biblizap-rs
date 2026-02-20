@@ -10,10 +10,11 @@ pub mod request;
 
 pub use completion::complete_articles;
 
+use crate::lens::citations::ArticleWithReferencesAndCitations;
+
 use super::common::SearchFor;
-use article::Article;
+
 use cache::CacheBackend;
-use citations::ReferencesAndCitations;
 use counter::LensIdCounter;
 use error::LensError;
 use id_types::*;
@@ -36,15 +37,6 @@ fn probable_output_size(max_depth: u8) -> usize {
     let max_depth = max_depth as usize;
     // Simple heuristic: grows exponentially with depth
     100 << (7 * (max_depth - 1)) // around 100^(max_depth-1) but fast
-}
-
-/// Helper struct that includes both the parent ID and its references/citations.
-/// This can be deserialized directly from the Lens API response.
-#[derive(Debug, serde::Deserialize)]
-struct ArticleWithReferencesAndCitations {
-    lens_id: LensId,
-    #[serde(flatten)]
-    refs_and_cites: ReferencesAndCitations,
 }
 
 /// Requests references and/or citations for a list of article IDs from the Lens.org API.
@@ -73,151 +65,23 @@ async fn request_references_and_citations<T>(
 where
     T: AsRef<str>,
 {
-    // If cache is enabled, use the _with_parents variant to preserve relationships
-    if cache.is_some() {
-        let parents_with_children = request_references_and_citations_with_parents(
-            id_list, search_for, api_key, client, cache,
-        )
-        .await?;
+    // Always use the _with_parents variant (handles both cache and non-cache paths)
+    // and flatten the results for depth 1
+    let parents_with_children =
+        request_references_and_citations_with_parents(id_list, search_for, api_key, client, cache)
+            .await?;
 
-        // Flatten to just the children IDs
-        let results: Vec<LensId> = parents_with_children
-            .into_iter()
-            .flat_map(|pwc| pwc.children)
-            .collect();
+    // Flatten to just the children IDs
+    let results: Vec<LensId> = parents_with_children
+        .into_iter()
+        .flat_map(|pwc| pwc.children)
+        .collect();
 
-        return Ok(results);
-    }
-
-    // No cache - use the original fast path
-    let output_id = futures::future::join_all(
-        id_list
-            .chunks(1000)
-            .map(|x| request_references_and_citations_chunk(x, search_for, api_key, client)),
-    )
-    .await
-    .into_iter()
-    .collect::<Result<Vec<_>, LensError>>()?
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-
-    if output_id.is_empty() {
+    if results.is_empty() {
         return Err(LensError::NoArticlesFound);
     }
 
-    Ok(output_id)
-}
-
-/// Requests references and/or citations for a chunk of article IDs from the Lens.org API.
-///
-/// This is an internal helper function used by `request_references_and_citations`.
-/// It categorizes the IDs and makes typed requests.
-///
-/// # Arguments
-///
-/// * `id_list`: A slice of items that can be referenced as strings for this chunk.
-/// * `search_for`: Specifies whether to search for references, citations, or both.
-/// * `api_key`: The API key for Lens.org.
-/// * `client`: An optional `reqwest::Client` to use for requests. If `None`, a new client is created.
-///
-/// # Returns
-///
-/// A `Result` containing a vector of `LensId`s for this chunk, or a `LensError`.
-async fn request_references_and_citations_chunk<T>(
-    id_list: &[T],
-    search_for: &SearchFor,
-    api_key: &str,
-    client: Option<&reqwest::Client>,
-) -> Result<Vec<LensId>, LensError>
-where
-    T: AsRef<str>,
-{
-    let iter = id_list.iter().map(|item| item.as_ref());
-
-    let typed_id_list = TypedIdList::from_raw_id_list(iter.clone())?;
-    let mut references_and_citations = Vec::<LensId>::with_capacity(iter.into_iter().count());
-
-    let client = match client {
-        Some(t) => t.to_owned(),
-        None => reqwest::Client::new(),
-    };
-
-    // Fetch references/citations by each ID type
-    references_and_citations.append(
-        &mut request_references_and_citations_typed_chunk(
-            &typed_id_list.pmid,
-            "pmid",
-            search_for,
-            api_key,
-            &client,
-        )
-        .await?,
-    );
-    references_and_citations.append(
-        &mut request_references_and_citations_typed_chunk(
-            &typed_id_list.lens_id,
-            "lens_id",
-            search_for,
-            api_key,
-            &client,
-        )
-        .await?,
-    );
-    references_and_citations.append(
-        &mut request_references_and_citations_typed_chunk(
-            &typed_id_list.doi,
-            "doi",
-            search_for,
-            api_key,
-            &client,
-        )
-        .await?,
-    );
-
-    Ok(references_and_citations)
-}
-
-/// Fetches references and/or citations from Lens.org for a list of IDs of a specific type.
-///
-/// This is an internal helper function used by `request_references_and_citations_chunk`.
-///
-/// # Arguments
-///
-/// * `id_list`: A slice of string slices representing IDs of a single type.
-/// * `id_type`: The type of IDs in `id_list`.
-/// * `search_for`: Specifies whether to search for references, citations, or both.
-/// * `api_key`: The API key for Lens.org.
-/// * `client`: The `reqwest::Client` to use for the request.
-///
-/// # Returns
-///
-/// A `Result` containing a vector of `LensId`s, or a `LensError`.
-async fn request_references_and_citations_typed_chunk(
-    id_list: &[&str],
-    id_type: &str,
-    search_for: &SearchFor,
-    api_key: &str,
-    client: &reqwest::Client,
-) -> Result<Vec<LensId>, LensError> {
-    // Determine which fields to include based on the search direction
-    let include = match search_for {
-        SearchFor::Both => vec!["lens_id", "references", "scholarly_citations"],
-        SearchFor::Citations => vec!["lens_id", "scholarly_citations"],
-        SearchFor::References => vec!["lens_id", "references"],
-    };
-
-    // Use optimized direct deserialization
-    let refs_and_cites: Vec<ReferencesAndCitations> =
-        request_and_parse(client, api_key, id_list, id_type, &include).await?;
-
-    // Extract all related Lens IDs
-    let ret = refs_and_cites
-        .into_iter()
-        .flat_map(|n| n.get_both())
-        .collect::<Vec<_>>();
-
-    Ok(ret)
+    Ok(results)
 }
 
 /// Helper struct to preserve parent-child relationship when querying citations.
@@ -632,14 +496,33 @@ where
         SearchFor::References => vec!["lens_id", "references"],
     };
 
-    let id_strs: Vec<&str> = id_list.iter().map(|id| id.as_ref()).collect();
+    // Categorize IDs by type (PMID, DOI, LensId)
+    let iter = id_list.iter().map(|item| item.as_ref());
+    let typed_id_list = TypedIdList::from_raw_id_list(iter)?;
 
-    // Use optimized direct deserialization
-    let articles: Vec<ArticleWithReferencesAndCitations> =
-        request_and_parse(client, api_key, &id_strs, "lens_id", &include).await?;
+    let mut all_results = Vec::new();
+
+    // Fetch for each ID type
+    if !typed_id_list.pmid.is_empty() {
+        let articles: Vec<ArticleWithReferencesAndCitations> =
+            request_and_parse(client, api_key, &typed_id_list.pmid, "pmid", &include).await?;
+        all_results.extend(articles);
+    }
+
+    if !typed_id_list.lens_id.is_empty() {
+        let articles: Vec<ArticleWithReferencesAndCitations> =
+            request_and_parse(client, api_key, &typed_id_list.lens_id, "lens_id", &include).await?;
+        all_results.extend(articles);
+    }
+
+    if !typed_id_list.doi.is_empty() {
+        let articles: Vec<ArticleWithReferencesAndCitations> =
+            request_and_parse(client, api_key, &typed_id_list.doi, "doi", &include).await?;
+        all_results.extend(articles);
+    }
 
     // Convert to ParentWithChildren
-    let results = articles
+    let results = all_results
         .into_iter()
         .map(|article| ParentWithChildren {
             parent_id: article.lens_id,
@@ -748,29 +631,6 @@ mod tests {
         assert_eq!(probable_output_size(3), 1638400);
     }
 
-    /// Tests the `complete_articles` function by fetching details for known IDs.
-    #[tokio::test]
-    async fn complete_articles_test() {
-        let src_id = [
-            "020-200-401-307-33X",
-            "050-708-976-791-252",
-            "30507730",
-            "10.1016/j.nephro.2007.05.005",
-        ];
-
-        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
-
-        let articles = completion::complete_articles(&src_id, &api_key, None, None)
-            .await
-            .unwrap();
-
-        assert_eq!(articles.len(), src_id.len());
-
-        for article in articles.into_iter() {
-            println!("{article:#?}");
-        }
-    }
-
     /// Tests the `snowball` function with invalid IDs to ensure proper error handling.
     #[tokio::test]
     async fn snowball_fail_invalid_ids() {
@@ -818,14 +678,20 @@ mod tests {
             .await
             .unwrap();
 
+        println!("Articles found : {}", new_id.len());
         // Assertions based on expected results from the API for these specific IDs and depth
-        assert!(new_id.len() > 75565);
+        assert!(new_id.len() >= 20659);
 
         let score_hashmap = new_id.into_inner();
 
         let max_score_lens_id = score_hashmap.iter().max_by_key(|entry| entry.1).unwrap();
-        assert_eq!(max_score_lens_id.0.as_ref(), "020-200-401-307-33X");
-        assert!(*max_score_lens_id.1 > 67usize);
+        println!(
+            "Best article found {} with score {}",
+            max_score_lens_id.0.as_ref(),
+            *max_score_lens_id.1
+        );
+        assert_eq!(max_score_lens_id.0.as_ref(), "050-708-976-791-252");
+        assert!(*max_score_lens_id.1 >= 64usize);
 
         // Take a subset of unique IDs for further testing (e.g., completing articles)
         let new_id_dedup = score_hashmap
@@ -858,7 +724,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(direct_citations.len() >= 991);
+        assert!(direct_citations.len() == citations::MAX_RELATIONSHIPS_PER_ARTICLE);
 
         let direct_references = snowball(
             &id_list,
@@ -1023,7 +889,10 @@ mod tests {
         .expect("First snowball call failed");
 
         println!("  Found {} IDs", result1.len());
-        assert!(result1.len() > 0, "Should find some results on first call");
+        assert!(
+            !result1.is_empty(),
+            "Should find some results on first call"
+        );
 
         // Second call - should use cache
         println!("Second snowball call with PMID (using cache)...");

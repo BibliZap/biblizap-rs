@@ -31,6 +31,44 @@ pub struct Article {
     pub year_published: Option<i32>,
 }
 
+/// Article metadata without the LensId.
+///
+/// This contains all the article fields except the lens_id itself.
+/// Used in combination with ArticleWithData for completion results.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ArticleData {
+    /// The title of the article.
+    pub title: Option<String>,
+    /// The abstract or summary of the article.
+    #[serde(rename = "abstract")]
+    pub summary: Option<String>,
+    /// The number of scholarly citations this article has received.
+    pub scholarly_citations_count: Option<i32>,
+
+    /// External identifiers for the article (e.g., DOI, PMID).
+    /// When deserializing from Lens.org API, uses custom visitor to parse array format.
+    #[serde(deserialize_with = "deserialize_external_ids_option")]
+    pub external_ids: Option<ExternalIds>,
+    /// The list of authors.
+    pub authors: Option<Vec<Author>>,
+    /// Information about the source (e.g., journal, conference).
+    pub source: Option<Source>,
+    /// The year of publication.
+    pub year_published: Option<i32>,
+}
+
+/// Article data combined with its LensId.
+///
+/// This is the primary structure returned from article completion operations.
+/// The LensId is separate from the article data to make the key explicit.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ArticleWithData {
+    /// The Lens.org specific ID for the article.
+    pub lens_id: LensId,
+    /// The article metadata.
+    pub article_data: ArticleData,
+}
+
 /// Represents external identifiers for an article.
 ///
 /// When stored in cache, this is serialized as a normal struct.

@@ -217,3 +217,42 @@ fn make_request_body(
     })
     .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test requesting scholarly_citations for PMID 2231712.
+    /// This PMID has ~120k citations, so we need to see how Lens responds
+    /// and whether we need to implement filtering.
+    #[tokio::test]
+    #[ignore]
+    async fn test_high_citation_pmid() -> Result<(), LensError> {
+        let api_key = match dotenvy::var("LENS_API_KEY") {
+            Ok(key) => key,
+            Err(_) => {
+                println!("Skipping test: LENS_API_KEY not set");
+                return Ok(());
+            }
+        };
+
+        let client = reqwest::Client::new();
+        let pmid = "2231712";
+
+        println!("\n=== Testing PMID {} (high citation count) ===", pmid);
+
+        // Request with lens_id and scholarly_citations
+        let include = vec!["lens_id", "scholarly_citations"];
+
+        let json_str = request_response(&client, &api_key, &[pmid], "pmid", &include)
+            .await?
+            .text()
+            .await?;
+
+        let parsed = serde_json::json!(&json_str);
+
+        println!("{:#?}", parsed);
+
+        Ok(())
+    }
+}

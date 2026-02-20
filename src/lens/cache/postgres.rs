@@ -1,6 +1,6 @@
 //! PostgreSQL backend implementation for the Lens cache
 
-use crate::lens::article::Article;
+use crate::lens::article::{ArticleData, ArticleWithData};
 use crate::lens::error::LensError;
 use crate::lens::lensid::LensId;
 use async_trait::async_trait;
@@ -66,17 +66,14 @@ struct ArticleRow {
 }
 
 impl ArticleRow {
-    fn extract(self) -> Result<(LensId, Article), LensError> {
+    fn extract(self) -> Result<ArticleWithData, LensError> {
         let lens_id = LensId::try_from(self.lens_id.as_str())?;
-        let article: Article = serde_json::from_str(&self.article_json)?;
+        let article_data: ArticleData = serde_json::from_str(&self.article_json)?;
 
-        Ok((lens_id, article))
-    }
-
-    fn extract_string(self) -> Result<(String, Article), LensError> {
-        let article: Article = serde_json::from_str(&self.article_json)?;
-
-        Ok((self.lens_id, article))
+        Ok(ArticleWithData {
+            lens_id,
+            article_data,
+        })
     }
 }
 
@@ -252,12 +249,9 @@ impl CacheBackend for PostgresBackend {
         Ok(())
     }
 
-    async fn get_article_data(
-        &self,
-        ids: &[LensId],
-    ) -> Result<HashMap<LensId, Article>, LensError> {
+    async fn get_article_data(&self, ids: &[LensId]) -> Result<Vec<ArticleWithData>, LensError> {
         if ids.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(Vec::new());
         }
 
         // PostgreSQL allows us to use ANY with an array - more efficient than JSON
@@ -277,7 +271,7 @@ impl CacheBackend for PostgresBackend {
         rows.into_iter().map(|x| x.extract()).collect()
     }
 
-    async fn store_article_data(&self, batch: &[(LensId, Article)]) -> Result<(), LensError> {
+    async fn store_article_data(&self, batch: &[ArticleWithData]) -> Result<(), LensError> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -299,11 +293,11 @@ impl CacheBackend for PostgresBackend {
             // Pre-serialize all JSON (handles errors before building query)
             let rows: Vec<(String, String, i64)> = chunk
                 .iter()
-                .map(|(id, articles)| {
-                    let id_str = id.as_ref().to_string();
-                    let articles_json = serde_json::to_string(articles)?;
+                .map(|article_with_data| {
+                    let id_str = article_with_data.lens_id.as_ref().to_string();
+                    let article_json = serde_json::to_string(&article_with_data.article_data)?;
 
-                    Ok((id_str, articles_json, rough_timestamp))
+                    Ok((id_str, article_json, rough_timestamp))
                 })
                 .collect::<Result<Vec<_>, LensError>>()?;
 
@@ -465,76 +459,6 @@ impl CacheBackend for PostgresBackend {
             builder.push(
                 " ON CONFLICT (string_id) DO UPDATE SET citations_json = excluded.citations_json, fetched_at = excluded.fetched_at",
             );
-
-            builder.build().execute(&mut *tx).await?;
-        }
-
-        tx.commit().await?;
-
-        Ok(())
-    }
-
-    async fn get_article_data_not_lens_id(
-        &self,
-        ids: &[String],
-    ) -> Result<HashMap<String, Article>, LensError> {
-        if ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let ids_vec: Vec<String> = ids.to_vec();
-
-        let rows: Vec<ArticleRow> = sqlx::query_as(
-            r#"
-                SELECT string_id as lens_id, article_json
-                FROM article_data_not_lens_id
-                WHERE string_id = ANY($1)
-            "#,
-        )
-        .bind(&ids_vec)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter().map(|x| x.extract_string()).collect()
-    }
-
-    async fn store_article_data_not_lens_id(
-        &self,
-        batch: &[(String, Article)],
-    ) -> Result<(), LensError> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        const CHUNK_SIZE: usize = 5000;
-
-        let mut tx = self.pool.begin().await?;
-
-        let rough_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        for chunk in batch.chunks(CHUNK_SIZE) {
-            let rows: Vec<(String, String, i64)> = chunk
-                .iter()
-                .map(|(id, article)| {
-                    let article_json = serde_json::to_string(article)?;
-                    Ok((id.clone(), article_json, rough_timestamp))
-                })
-                .collect::<Result<Vec<_>, LensError>>()?;
-
-            let mut builder = sqlx::QueryBuilder::new(
-                "INSERT INTO article_data_not_lens_id (string_id, article_json, fetched_at) ",
-            );
-
-            builder.push_values(rows, |mut b, (id_str, article_json, timestamp)| {
-                b.push_bind(id_str)
-                    .push_bind(article_json)
-                    .push_bind(timestamp);
-            });
-
-            builder.push(" ON CONFLICT (string_id) DO NOTHING");
 
             builder.build().execute(&mut *tx).await?;
         }
@@ -1005,8 +929,7 @@ mod tests {
         let id2 = LensId::from(98765432109876);
         let id3 = LensId::from(11111111111111);
 
-        let article1 = Article {
-            lens_id: id1.clone(),
+        let article_data1 = ArticleData {
             title: Some("Test Article 1".to_string()),
             summary: Some("This is a test abstract".to_string()),
             scholarly_citations_count: Some(42),
@@ -1030,8 +953,7 @@ mod tests {
             year_published: Some(2023),
         };
 
-        let article2 = Article {
-            lens_id: id2.clone(),
+        let article_data2 = ArticleData {
             title: Some("Test Article 2".to_string()),
             summary: None,
             scholarly_citations_count: Some(10),
@@ -1041,7 +963,17 @@ mod tests {
             year_published: Some(2024),
         };
 
-        let batch = vec![(id1.clone(), article1), (id2.clone(), article2)];
+        let article1 = ArticleWithData {
+            lens_id: id1.clone(),
+            article_data: article_data1,
+        };
+
+        let article2 = ArticleWithData {
+            lens_id: id2.clone(),
+            article_data: article_data2,
+        };
+
+        let batch = vec![article1, article2];
 
         // Store articles
         backend.store_article_data(&batch).await?;
@@ -1053,15 +985,21 @@ mod tests {
 
         assert_eq!(result.len(), 2);
 
-        let retrieved1 = result.get(&id1).unwrap();
-        assert_eq!(retrieved1.title, Some("Test Article 1".to_string()));
-        assert_eq!(retrieved1.scholarly_citations_count, Some(42));
-        assert_eq!(retrieved1.year_published, Some(2023));
-        assert!(retrieved1.external_ids.is_some());
+        let retrieved1 = result.iter().find(|a| a.lens_id == id1).unwrap();
+        assert_eq!(
+            retrieved1.article_data.title,
+            Some("Test Article 1".to_string())
+        );
+        assert_eq!(retrieved1.article_data.scholarly_citations_count, Some(42));
+        assert_eq!(retrieved1.article_data.year_published, Some(2023));
+        assert!(retrieved1.article_data.external_ids.is_some());
 
-        let retrieved2 = result.get(&id2).unwrap();
-        assert_eq!(retrieved2.title, Some("Test Article 2".to_string()));
-        assert_eq!(retrieved2.year_published, Some(2024));
+        let retrieved2 = result.iter().find(|a| a.lens_id == id2).unwrap();
+        assert_eq!(
+            retrieved2.article_data.title,
+            Some("Test Article 2".to_string())
+        );
+        assert_eq!(retrieved2.article_data.year_published, Some(2024));
 
         // Query non-existent ID
         let result = backend.get_article_data(std::slice::from_ref(&id3)).await?;

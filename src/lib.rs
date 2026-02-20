@@ -12,7 +12,7 @@ pub use common::SearchFor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::lens::cache::CacheBackend;
+use crate::lens::{cache::CacheBackend, lensid::LensId};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -46,6 +46,45 @@ impl From<lens::article::Article> for Article {
             summary: article.summary.to_owned(),
             doi: article.doi(),
             citations: article.scholarly_citations_count,
+            score: None,
+        }
+    }
+}
+
+impl From<lens::article::ArticleWithData> for Article {
+    fn from(article_with_data: lens::article::ArticleWithData) -> Self {
+        let article_data = article_with_data.article_data;
+        let external_ids = article_data.external_ids;
+
+        let doi = external_ids
+            .as_ref()
+            .and_then(|ids| ids.doi.first().cloned());
+
+        let first_author = article_data
+            .authors
+            .as_ref()
+            .and_then(|authors| authors.first())
+            .map(|author| {
+                format!(
+                    "{} {}",
+                    author.first_name.clone().unwrap_or_default(),
+                    author.last_name.clone().unwrap_or_default()
+                )
+            });
+
+        let journal = article_data
+            .source
+            .as_ref()
+            .and_then(|source| source.title.clone());
+
+        Article {
+            first_author,
+            year_published: article_data.year_published,
+            journal,
+            title: article_data.title,
+            summary: article_data.summary,
+            doi,
+            citations: article_data.scholarly_citations_count,
             score: None,
         }
     }
@@ -100,11 +139,7 @@ where
     s.sort_by_key(|x| std::cmp::Reverse(x.1));
     s.truncate(output_max_size);
 
-    let selected_id = s
-        .into_iter()
-        .map(|(id, _)| id)
-        .to_owned()
-        .collect::<Vec<_>>();
+    let selected_id: Vec<LensId> = score_hashmap.keys().cloned().collect();
 
     let lens_articles =
         lens::complete_articles(&selected_id, api_key, Some(&client), cache).await?;
