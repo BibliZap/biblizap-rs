@@ -160,6 +160,13 @@ impl CacheBackend for SqliteBackend {
             return Ok(HashMap::new());
         }
 
+        // Calculate timestamp for 2 weeks ago (in Unix epoch seconds)
+        let two_weeks_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - (14 * 24 * 60 * 60); // 14 days in seconds
+
         let ids_json = Self::ids_to_json(ids)?;
 
         let rows: Vec<CitationsRow> = sqlx::query_as(
@@ -167,9 +174,11 @@ impl CacheBackend for SqliteBackend {
                 SELECT lens_id, citations_json
                 FROM article_citations
                 WHERE lens_id IN (SELECT value FROM json_each(?))
+                AND fetched_at >= ?
             "#,
         )
         .bind(&ids_json)
+        .bind(two_weeks_ago)
         .fetch_all(&self.pool)
         .await?;
 

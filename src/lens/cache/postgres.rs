@@ -164,7 +164,14 @@ impl CacheBackend for PostgresBackend {
             return Ok(HashMap::new());
         }
 
-        // Use PostgreSQL's native array operations
+        // Calculate timestamp for 2 weeks ago (in Unix epoch seconds)
+        let two_weeks_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - (14 * 24 * 60 * 60); // 14 days in seconds
+
+        // Use PostgreSQL's native array operations + timestamp filter
         let ids_vec: Vec<String> = ids.iter().map(|id| id.as_ref().to_string()).collect();
 
         let rows: Vec<CitationsRow> = sqlx::query_as(
@@ -172,9 +179,11 @@ impl CacheBackend for PostgresBackend {
                 SELECT lens_id, citations_json
                 FROM article_citations
                 WHERE lens_id = ANY($1)
+                AND fetched_at >= $2
             "#,
         )
         .bind(&ids_vec)
+        .bind(two_weeks_ago)
         .fetch_all(&self.pool)
         .await?;
 
