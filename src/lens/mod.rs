@@ -10,7 +10,9 @@ pub mod request;
 
 pub use completion::complete_articles;
 
-use crate::lens::citations::ArticleWithReferencesAndCitations;
+use crate::lens::citations::{
+    ArticleWithReferencesAndCitations, ArticleWithReferencesAndCitationsMerged,
+};
 
 use super::common::SearchFor;
 
@@ -84,13 +86,6 @@ where
     Ok(results)
 }
 
-/// Helper struct to preserve parent-child relationship when querying citations.
-#[derive(Debug)]
-struct ParentWithChildren {
-    parent_id: LensId,
-    children: Vec<LensId>,
-}
-
 /// Requests references and/or citations while preserving parent-child relationships.
 ///
 /// Unlike `request_references_and_citations`, this function returns a mapping
@@ -116,7 +111,7 @@ async fn request_references_and_citations_with_parents<T>(
     api_key: &str,
     client: Option<&reqwest::Client>,
     cache: Option<&dyn CacheBackend>,
-) -> Result<Vec<ParentWithChildren>, LensError>
+) -> Result<Vec<ArticleWithReferencesAndCitationsMerged>, LensError>
 where
     T: AsRef<str>,
 {
@@ -236,7 +231,7 @@ where
         .collect();
 
     // Build results from cache for LensIds
-    let mut results: Vec<ParentWithChildren> = fully_cached_lens_ids
+    let mut results: Vec<ArticleWithReferencesAndCitationsMerged> = fully_cached_lens_ids
         .iter()
         .map(|id| {
             let children = match search_for {
@@ -249,7 +244,7 @@ where
                     refs
                 }
             };
-            ParentWithChildren {
+            ArticleWithReferencesAndCitationsMerged {
                 parent_id: id.clone(),
                 children,
             }
@@ -282,7 +277,7 @@ where
                 }
             };
 
-            results.push(ParentWithChildren {
+            results.push(ArticleWithReferencesAndCitationsMerged {
                 parent_id: parent_id.clone(),
                 children,
             });
@@ -380,10 +375,7 @@ where
             }
             combined_map
                 .into_iter()
-                .map(|(parent_id, children)| ParentWithChildren {
-                    parent_id,
-                    children,
-                })
+                .map(ArticleWithReferencesAndCitationsMerged::from)
                 .collect::<Vec<_>>()
         } else {
             futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
@@ -441,7 +433,7 @@ async fn request_references_and_citations_with_parents_chunk<T>(
     api_key: &str,
     client: Option<&reqwest::Client>,
     cache: Option<&dyn CacheBackend>,
-) -> Result<Vec<ParentWithChildren>, LensError>
+) -> Result<Vec<ArticleWithReferencesAndCitationsMerged>, LensError>
 where
     T: AsRef<str>,
 {
@@ -478,26 +470,6 @@ where
         )
         .await?;
 
-        // Populate id_mappings for non-LensId requests if cache is available
-        if let Some(cache_backend) = cache {
-            let mut mappings = Vec::new();
-            for article in &articles {
-                if let Some(ref external_ids) = article.external_ids {
-                    // Map all PMIDs to this lens_id
-                    for pmid in &external_ids.pmid {
-                        mappings.push((pmid.clone(), article.lens_id.clone()));
-                    }
-                    // Map all DOIs to this lens_id
-                    for doi in &external_ids.doi {
-                        mappings.push((doi.clone(), article.lens_id.clone()));
-                    }
-                }
-            }
-            if !mappings.is_empty() {
-                let _ = cache_backend.store_id_mapping(&mappings).await;
-            }
-        }
-
         all_results.extend(articles);
     }
 
@@ -521,36 +493,14 @@ where
         )
         .await?;
 
-        // Populate id_mappings for non-LensId requests if cache is available
-        if let Some(cache_backend) = cache {
-            let mut mappings = Vec::new();
-            for article in &articles {
-                if let Some(ref external_ids) = article.external_ids {
-                    // Map all PMIDs to this lens_id
-                    for pmid in &external_ids.pmid {
-                        mappings.push((pmid.clone(), article.lens_id.clone()));
-                    }
-                    // Map all DOIs to this lens_id
-                    for doi in &external_ids.doi {
-                        mappings.push((doi.clone(), article.lens_id.clone()));
-                    }
-                }
-            }
-            if !mappings.is_empty() {
-                let _ = cache_backend.store_id_mapping(&mappings).await;
-            }
-        }
-
         all_results.extend(articles);
     }
+    ArticleWithReferencesAndCitations::store_any_mappings(&all_results, cache).await?;
 
     // Convert to ParentWithChildren
     let results = all_results
         .into_iter()
-        .map(|article| ParentWithChildren {
-            parent_id: article.lens_id,
-            children: article.refs_and_cites.get_both(),
-        })
+        .map(ArticleWithReferencesAndCitationsMerged::from)
         .collect();
 
     Ok(results)
@@ -1035,5 +985,92 @@ mod tests {
         );
 
         println!("✓ No ID mapping was created for LensId request (as expected)");
+    }
+
+    /// Test that snowball works completely offline when cache is populated
+    /// This validates that cached data eliminates the need for network access
+    #[cfg_attr(feature = "cache-sqlite", tokio::test)]
+    async fn test_snowball_offline_with_cache() {
+        use crate::lens::cache::sqlite::SqliteBackend;
+        use std::time::Duration;
+
+        let api_key = dotenvy::var("LENS_API_KEY").expect("LENS_API_KEY must be set in .env file");
+
+        // Create an in-memory cache
+        let cache = SqliteBackend::from_url("sqlite::memory:")
+            .await
+            .expect("Failed to create cache backend");
+
+        // Use a known PMID
+        let pmid = "11748933";
+        let ids = vec![pmid];
+
+        // Step 1: Populate cache with normal client (online)
+        println!("Step 1: Populating cache with normal client (online)...");
+        let normal_client = reqwest::Client::new();
+        let result1 = request_references_and_citations_with_parents(
+            &ids,
+            &SearchFor::References,
+            &api_key,
+            Some(&normal_client),
+            Some(&cache),
+        )
+        .await
+        .expect("First request with normal client should succeed");
+
+        assert!(!result1.is_empty(), "Should have fetched references");
+        println!("  ✓ Cached {} articles", result1.len());
+
+        // Step 2: Create a broken client that cannot make network requests
+        println!("Step 2: Creating broken client (simulating offline)...");
+        let broken_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://0.0.0.0:1").expect("Failed to create invalid proxy"))
+            .timeout(Duration::from_secs(1)) // Fast timeout for quick failure
+            .build()
+            .expect("Failed to build broken client");
+
+        println!("  ✓ Client configured to fail all network requests");
+
+        // Step 2.5: Verify the broken client actually fails without cache
+        println!("Step 2.5: Verifying broken client fails without cache...");
+        let verification_result = request_references_and_citations_with_parents(
+            &[pmid],
+            &SearchFor::References,
+            &api_key,
+            Some(&broken_client),
+            None,
+        )
+        .await;
+
+        assert!(
+            verification_result.is_err(),
+            "Broken client should fail when data is not in cache"
+        );
+        println!("  ✓ Confirmed: broken client cannot make network requests");
+
+        // Step 3: Try the same query with broken client - should succeed from cache!
+        println!("Step 3: Attempting same query with broken client (should work from cache)...");
+        let result2 = request_references_and_citations_with_parents(
+            &ids,
+            &SearchFor::References,
+            &api_key,
+            Some(&broken_client),
+            Some(&cache),
+        )
+        .await
+        .expect("Second request should succeed from cache despite broken client");
+
+        assert_eq!(
+            result1.len(),
+            result2.len(),
+            "Both requests should return the same number of results"
+        );
+        assert_eq!(
+            result1[0].parent_id, result2[0].parent_id,
+            "Results should be identical"
+        );
+
+        println!("  ✓ Query succeeded using only cache (no network access)");
+        println!("\n✓ OFFLINE TEST PASSED: System works without network when cache is populated!");
     }
 }

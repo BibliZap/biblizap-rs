@@ -79,12 +79,6 @@ pub struct ExternalIds {
     pub pmid: Vec<String>,
     /// List of DOIs (Digital Object Identifier).
     pub doi: Vec<String>,
-    /// List of CORE IDs.
-    pub coreid: Vec<String>,
-    /// List of PubMed Central IDs (PMCID).
-    pub pmcid: Vec<String>,
-    /// List of Microsoft Academic Graph IDs (MAGID).
-    pub magid: Vec<String>,
 }
 
 /// Represents an author in the Lens.org API response.
@@ -194,9 +188,6 @@ impl<'de> Visitor<'de> for ExternalIdsFlexibleVisitor {
             match value_type {
                 "pmid" => result.pmid.push(value_str),
                 "doi" => result.doi.push(value_str),
-                "pmcid" => result.pmcid.push(value_str),
-                "magid" => result.magid.push(value_str),
-                "coreid" => result.coreid.push(value_str),
                 _ => {} // Ignore unknown types
             }
         }

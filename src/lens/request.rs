@@ -3,6 +3,11 @@ use crate::lens::error::LensApiErrorInfo;
 use super::error::*;
 use serde::Deserialize;
 
+pub const INCLUDES_SEARCH_FOR_CITATIONS_AND_REFERENCES: [&str; 3] =
+    ["lens_id", "references", "scholarly_citations"];
+
+pub const INCLUDES_SEARCH_FOR_CITATIONS: [&str; 2] = ["lens_id", "scholarly_citations"];
+
 /// Makes a POST request to the Lens.org API's scholarly search endpoint.
 ///
 /// This function constructs the request body based on the provided IDs, ID type,

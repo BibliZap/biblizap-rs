@@ -757,9 +757,6 @@ mod tests {
             external_ids: Some(ExternalIds {
                 pmid: vec!["12345".to_string()],
                 doi: vec!["10.1234/test".to_string()],
-                coreid: vec![],
-                pmcid: vec![],
-                magid: vec![],
             }),
             authors: Some(vec![Author {
                 first_name: Some("John".to_string()),

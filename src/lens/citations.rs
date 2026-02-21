@@ -1,6 +1,9 @@
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use std::collections::HashMap;
 use std::marker::PhantomData;
+
+use crate::lens::error::LensError;
 
 use super::article::{ExternalIds, deserialize_external_ids_option};
 use super::lensid::LensId;
@@ -176,4 +179,79 @@ pub struct ArticleWithReferencesAndCitations {
     /// External IDs (PMID, DOI, etc.) - needed for ID mapping when querying by non-LensId
     #[serde(default, deserialize_with = "deserialize_external_ids_option")]
     pub external_ids: Option<ExternalIds>,
+}
+
+impl ArticleWithReferencesAndCitations {
+    pub fn id_mappings_single_article(&self) -> Option<HashMap<String, LensId>> {
+        let external_ids = self.external_ids.clone()?;
+
+        let pmid = external_ids
+            .pmid
+            .clone()
+            .into_iter()
+            .map(|x| (x, self.lens_id.clone()));
+
+        let doi = external_ids
+            .doi
+            .clone()
+            .into_iter()
+            .map(|x| (x, self.lens_id.clone()));
+
+        Some(pmid.chain(doi).collect())
+    }
+
+    pub fn id_mappings<'a, I>(articles: I) -> HashMap<String, LensId>
+    where
+        I: IntoIterator<Item = &'a Self>,
+    {
+        articles
+            .into_iter()
+            .filter_map(|article| article.id_mappings_single_article())
+            .fold(HashMap::new(), |mut acc, x| {
+                acc.extend(x);
+                acc
+            })
+    }
+
+    pub async fn store_any_mappings<'a, I>(
+        articles: I,
+        cache: Option<&dyn super::cache::CacheBackend>,
+    ) -> Result<(), LensError>
+    where
+        I: IntoIterator<Item = &'a Self>,
+    {
+        if let Some(cache_backend) = cache {
+            let mappings: Vec<(String, LensId)> =
+                ArticleWithReferencesAndCitations::id_mappings(articles)
+                    .into_iter()
+                    .collect();
+            cache_backend.store_id_mapping(&mappings).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Helper struct to preserve parent-child relationship when querying citations.
+#[derive(Debug)]
+pub struct ArticleWithReferencesAndCitationsMerged {
+    pub parent_id: LensId,
+    pub children: Vec<LensId>,
+}
+
+impl From<ArticleWithReferencesAndCitations> for ArticleWithReferencesAndCitationsMerged {
+    fn from(article: ArticleWithReferencesAndCitations) -> Self {
+        Self {
+            parent_id: article.lens_id,
+            children: article.refs_and_cites.get_both(),
+        }
+    }
+}
+
+impl From<(LensId, Vec<LensId>)> for ArticleWithReferencesAndCitationsMerged {
+    fn from((parent_id, children): (LensId, Vec<LensId>)) -> Self {
+        Self {
+            parent_id,
+            children,
+        }
+    }
 }
