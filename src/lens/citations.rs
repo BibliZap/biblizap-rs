@@ -15,7 +15,7 @@ use super::lensid::LensId;
 ///
 /// Note: The Lens API returns citations/references sorted by lens_id (essentially random order),
 /// so this gives a representative sample rather than systematic bias.
-pub const MAX_RELATIONSHIPS_PER_ARTICLE: usize = 500;
+pub const MAX_RELATIONSHIPS_PER_ARTICLE: usize = 200;
 
 /// Represents a list of references returned by the Lens.org API.
 ///
