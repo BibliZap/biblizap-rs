@@ -1,12 +1,18 @@
 //! Cache backend implementations for Lens.org article data
 //!
 //! This module provides a trait-based cache system with multiple backend implementations:
-//! - SQLite (via `sqlite` module)
-//! - PostgreSQL (via `postgres` module - TODO)
+//! - SQLite (via `sqlite` module) - suitable for development and low-concurrency scenarios
+//! - PostgreSQL (via `postgres` module) - recommended for production with high concurrency
 //!
 //! The cache stores two types of relationships:
 //! - References (outgoing edges): immutable once fetched
 //! - Citations (incoming edges): mutable, need periodic refresh
+//!
+//! ## Performance Considerations
+//!
+//! For high-concurrency scenarios (300+ users, 16+ async workers), use PostgreSQL with
+//! a properly sized connection pool via `PostgresBackend::from_pool()`. See the README
+//! for detailed configuration guidelines.
 
 use crate::lens::article::ArticleWithData;
 
@@ -25,8 +31,8 @@ pub mod postgres;
 #[cfg(feature = "cache-sqlite")]
 pub use sqlite::SqliteBackend;
 
-// #[cfg(feature = "cache-postgres")]
-// pub use postgres::PostgresBackend;
+#[cfg(feature = "cache-postgres")]
+pub use postgres::PostgresBackend;
 
 /// Computes which IDs were not found in the cache (misses)
 ///
