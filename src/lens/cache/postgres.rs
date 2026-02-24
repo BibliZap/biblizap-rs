@@ -561,7 +561,42 @@ impl CacheBackend for PostgresBackend {
 }
 
 impl PostgresBackend {
+    /// Create a new PostgreSQL backend from a pre-configured connection pool
+    ///
+    /// This method allows you to configure the connection pool size and other
+    /// parameters before creating the backend. **Recommended for high-concurrency
+    /// scenarios** where the default pool size (10 connections) may be insufficient.
+    ///
+    /// # Arguments
+    /// * `pool` - Pre-configured sqlx PgPool
+    ///
+    /// # Example
+    /// ```ignore
+    /// use sqlx::postgres::PgPoolOptions;
+    ///
+    /// // Configure pool for high concurrency (e.g., 300+ concurrent users)
+    /// let pool = PgPoolOptions::new()
+    ///     .max_connections(50)  // Increase for high concurrency
+    ///     .min_connections(10)  // Keep connections warm
+    ///     .acquire_timeout(std::time::Duration::from_secs(5))
+    ///     .connect("postgres://localhost/lens_cache")
+    ///     .await?;
+    ///
+    /// let backend = PostgresBackend::from_pool(pool).await?;
+    /// ```
+    pub async fn from_pool(pool: PgPool) -> Result<Self, LensError> {
+        let backend = Self { pool };
+        backend.run_migrations().await?;
+        backend.optimize_postgres().await?;
+
+        Ok(backend)
+    }
+
     /// Create a new PostgreSQL backend from a connection URL
+    ///
+    /// Uses default connection pool settings (max 10 connections). For high-concurrency
+    /// scenarios (e.g., 16+ workers, 300+ concurrent users), consider using `from_pool()`
+    /// with custom `PgPoolOptions` instead.
     ///
     /// # Arguments
     /// * `url` - PostgreSQL connection URL (e.g., "postgres://user:pass@localhost/dbname")
@@ -572,11 +607,7 @@ impl PostgresBackend {
     /// ```
     pub async fn from_url(url: &str) -> Result<Self, LensError> {
         let pool = PgPool::connect(url).await?;
-        let backend = Self { pool };
-        backend.run_migrations().await?;
-        backend.optimize_postgres().await?;
-
-        Ok(backend)
+        Self::from_pool(pool).await
     }
 
     /// Run database migrations (creates tables if they don't exist)
