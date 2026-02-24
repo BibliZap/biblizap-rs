@@ -389,6 +389,148 @@ impl CacheBackend for PostgresBackend {
         Ok(())
     }
 
+    async fn mark_as_fetching(&self, id: &LensId) -> Result<bool, LensError> {
+        let id_str = id.as_ref().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Stale threshold: 60 seconds
+        let stale_threshold = now - 60;
+
+        // Try to insert, or update if the existing record is stale (>60s old)
+        let result = sqlx::query(
+            r#"
+            INSERT INTO pending_fetches (lens_id, started_at)
+            VALUES ($1, $2)
+            ON CONFLICT (lens_id) DO UPDATE
+            SET started_at = EXCLUDED.started_at
+            WHERE pending_fetches.started_at < $3
+            "#,
+        )
+        .bind(&id_str)
+        .bind(now)
+        .bind(stale_threshold)
+        .execute(&self.pool)
+        .await?;
+
+        // If rows_affected > 0, we successfully marked it (either inserted or updated stale)
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn unmark_as_fetching(&self, id: &LensId) -> Result<(), LensError> {
+        let id_str = id.as_ref().to_string();
+
+        sqlx::query("DELETE FROM pending_fetches WHERE lens_id = $1")
+            .bind(&id_str)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn is_being_fetched(&self, id: &LensId) -> Result<bool, LensError> {
+        let id_str = id.as_ref().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let stale_threshold = now - 60;
+
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT started_at FROM pending_fetches
+            WHERE lens_id = $1 AND started_at >= $2
+            "#,
+        )
+        .bind(&id_str)
+        .bind(stale_threshold)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.is_some())
+    }
+
+    async fn mark_as_fetching_batch(
+        &self,
+        ids: &[LensId],
+    ) -> Result<Vec<(LensId, bool)>, LensError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let stale_threshold = now - 60;
+
+        let ids_vec: Vec<String> = ids.iter().map(|id| id.as_ref().to_string()).collect();
+
+        // Use PostgreSQL's UNNEST to insert multiple rows at once
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"
+            INSERT INTO pending_fetches (lens_id, started_at)
+            SELECT unnest($1::text[]), $2
+            ON CONFLICT (lens_id) DO UPDATE
+            SET started_at = EXCLUDED.started_at
+            WHERE pending_fetches.started_at < $3
+            RETURNING lens_id
+            "#,
+        )
+        .bind(&ids_vec)
+        .bind(now)
+        .bind(stale_threshold)
+        .fetch_all(&self.pool)
+        .await?;
+
+        // Create a set of successfully marked IDs
+        let marked_ids: std::collections::HashSet<String> =
+            rows.into_iter().map(|(id,)| id).collect();
+
+        // Build result vec matching input order
+        let results = ids
+            .iter()
+            .map(|id| {
+                let id_str = id.as_ref().to_string();
+                let success = marked_ids.contains(&id_str);
+                (id.clone(), success)
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    async fn unmark_as_fetching_batch(&self, ids: &[LensId]) -> Result<(), LensError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let ids_vec: Vec<String> = ids.iter().map(|id| id.as_ref().to_string()).collect();
+
+        sqlx::query(
+            r#"
+            DELETE FROM pending_fetches
+            WHERE lens_id = ANY($1)
+            "#,
+        )
+        .bind(&ids_vec)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn clear_pending_fetches(&self) -> Result<(), LensError> {
+        sqlx::query("DELETE FROM pending_fetches")
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
     async fn clear(&self) -> Result<(), LensError> {
         let mut tx = self.pool.begin().await?;
 
@@ -405,6 +547,10 @@ impl CacheBackend for PostgresBackend {
             .await?;
 
         sqlx::query("DELETE FROM id_mappings")
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM pending_fetches")
             .execute(&mut *tx)
             .await?;
 
@@ -486,6 +632,18 @@ impl PostgresBackend {
                 string_id TEXT PRIMARY KEY,
                 lens_id TEXT NOT NULL,
                 fetched_at BIGINT NOT NULL DEFAULT extract(epoch from now())
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Pending fetches table (for request deduplication)
+        sqlx::query(
+            r#"
+            CREATE UNLOGGED TABLE IF NOT EXISTS pending_fetches (
+                lens_id TEXT PRIMARY KEY,
+                started_at BIGINT NOT NULL DEFAULT extract(epoch from now())
             )
             "#,
         )
@@ -932,6 +1090,187 @@ mod tests {
         // Test empty input
         let empty_result = backend.get_id_mapping(&[]).await?;
         assert_eq!(empty_result.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mark_and_unmark_fetching() -> Result<(), LensError> {
+        let backend = create_test_backend().await?;
+
+        let id1 = LensId::from(12345678901234);
+
+        // Initially, ID should not be marked as fetching
+        assert!(!backend.is_being_fetched(&id1).await?);
+
+        // Mark as fetching
+        let marked = backend.mark_as_fetching(&id1).await?;
+        assert!(marked, "First mark should succeed");
+
+        // Should now be marked as fetching
+        assert!(backend.is_being_fetched(&id1).await?);
+
+        // Try to mark again (should fail - already being fetched)
+        let marked_again = backend.mark_as_fetching(&id1).await?;
+        assert!(!marked_again, "Second mark should fail (already fetching)");
+
+        // Unmark
+        backend.unmark_as_fetching(&id1).await?;
+
+        // Should no longer be marked
+        assert!(!backend.is_being_fetched(&id1).await?);
+
+        // Can mark again after unmarking
+        let marked_third = backend.mark_as_fetching(&id1).await?;
+        assert!(marked_third, "Mark after unmark should succeed");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stale_fetch_marks_are_overwritten() -> Result<(), LensError> {
+        let backend = create_test_backend().await?;
+
+        let id1 = LensId::from(12345678901234);
+
+        // Insert a stale mark (61 seconds ago)
+        let stale_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - 61;
+
+        sqlx::query("INSERT INTO pending_fetches (lens_id, started_at) VALUES ($1, $2)")
+            .bind(id1.as_ref().to_string())
+            .bind(stale_timestamp)
+            .execute(&backend.pool)
+            .await?;
+
+        // Stale mark should not be detected as "being fetched"
+        assert!(
+            !backend.is_being_fetched(&id1).await?,
+            "Stale marks (>60s) should not be detected"
+        );
+
+        // Should be able to mark again (overwriting stale mark)
+        let marked = backend.mark_as_fetching(&id1).await?;
+        assert!(marked, "Should be able to overwrite stale mark");
+
+        // Now it should be detected as being fetched (with fresh timestamp)
+        assert!(backend.is_being_fetched(&id1).await?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_fetch_coordination() -> Result<(), LensError> {
+        let backend = std::sync::Arc::new(create_test_backend().await?);
+
+        let id1 = LensId::from(12345678901234);
+        let refs = vec![LensId::from(1), LensId::from(2), LensId::from(3)];
+
+        // Simulate two concurrent requests for the same ID
+        let backend1 = backend.clone();
+        let backend2 = backend.clone();
+        let id1_clone = id1.clone();
+        let id1_clone2 = id1.clone();
+        let refs_clone = refs.clone();
+        let refs_clone2 = refs.clone();
+
+        let handle1 = tokio::spawn(async move {
+            // First caller tries to mark
+            let marked = backend1.mark_as_fetching(&id1_clone).await.unwrap();
+            if marked {
+                // Simulate API call delay
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                // Store the data
+                backend1
+                    .store_references(&[(id1_clone.clone(), refs_clone.clone())])
+                    .await
+                    .unwrap();
+
+                // Unmark
+                backend1.unmark_as_fetching(&id1_clone).await.unwrap();
+
+                "fetched"
+            } else {
+                "waited"
+            }
+        });
+
+        let handle2 = tokio::spawn(async move {
+            // Small delay to ensure handle1 marks first
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+            // Second caller tries to mark (should fail)
+            let marked = backend2.mark_as_fetching(&id1_clone2).await.unwrap();
+            if marked {
+                // Should not reach here in this test
+                backend2
+                    .store_references(&[(id1_clone2.clone(), refs_clone2.clone())])
+                    .await
+                    .unwrap();
+                backend2.unmark_as_fetching(&id1_clone2).await.unwrap();
+                "fetched"
+            } else {
+                // Wait for data to appear
+                for _ in 0..20 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let cached = backend2
+                        .get_references(&[id1_clone2.clone()])
+                        .await
+                        .unwrap();
+                    if cached.contains_key(&id1_clone2) {
+                        return "waited_found";
+                    }
+                }
+                "waited_timeout"
+            }
+        });
+
+        let result1 = handle1.await.unwrap();
+        let result2 = handle2.await.unwrap();
+
+        // One should fetch, one should wait and find
+        assert!(
+            (result1 == "fetched" && result2 == "waited_found")
+                || (result1 == "waited_found" && result2 == "fetched"),
+            "One caller should fetch, the other should wait and find data. Got: {} and {}",
+            result1,
+            result2
+        );
+
+        // Verify data is in cache
+        let cached = backend.get_references(&[id1.clone()]).await?;
+        assert_eq!(cached.get(&id1).unwrap(), &refs);
+
+        // Verify no pending marks remain
+        assert!(!backend.is_being_fetched(&id1).await?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_clear_pending_fetches() -> Result<(), LensError> {
+        let backend = create_test_backend().await?;
+
+        let id1 = LensId::from(12345678901234);
+        let id2 = LensId::from(98765432109876);
+
+        // Mark multiple IDs
+        backend.mark_as_fetching(&id1).await?;
+        backend.mark_as_fetching(&id2).await?;
+
+        assert!(backend.is_being_fetched(&id1).await?);
+        assert!(backend.is_being_fetched(&id2).await?);
+
+        // Clear all pending fetches
+        backend.clear_pending_fetches().await?;
+
+        // Should all be cleared
+        assert!(!backend.is_being_fetched(&id1).await?);
+        assert!(!backend.is_being_fetched(&id2).await?);
 
         Ok(())
     }

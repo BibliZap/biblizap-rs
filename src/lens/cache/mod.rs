@@ -139,6 +139,46 @@ pub trait CacheBackend: Send + Sync {
     /// * `batch` - Slice of (raw_string_id, lens_id) tuples to store
     async fn store_id_mapping(&self, batch: &[(String, LensId)]) -> Result<(), LensError>;
 
+    // Pending fetch coordination (prevents thundering herd)
+
+    /// Mark an ID as being fetched (in-flight API request)
+    ///
+    /// Returns true if the mark was successful (caller should proceed with fetch).
+    /// Returns false if another caller is already fetching this ID.
+    ///
+    /// Orphaned marks (>60s old) are automatically ignored/overwritten.
+    async fn mark_as_fetching(&self, id: &LensId) -> Result<bool, LensError>;
+
+    /// Mark multiple IDs as being fetched (batch operation)
+    ///
+    /// Returns a Vec of (LensId, success) tuples indicating which marks succeeded.
+    /// - true: caller should fetch this ID
+    /// - false: another caller is already fetching this ID
+    ///
+    /// Orphaned marks (>60s old) are automatically ignored/overwritten.
+    async fn mark_as_fetching_batch(
+        &self,
+        ids: &[LensId],
+    ) -> Result<Vec<(LensId, bool)>, LensError>;
+
+    /// Unmark an ID after fetch completes (success or failure)
+    ///
+    /// Should be called in a finally block to ensure cleanup even on errors.
+    async fn unmark_as_fetching(&self, id: &LensId) -> Result<(), LensError>;
+
+    /// Unmark multiple IDs after fetches complete (batch operation)
+    ///
+    /// Should be called in a finally block to ensure cleanup even on errors.
+    async fn unmark_as_fetching_batch(&self, ids: &[LensId]) -> Result<(), LensError>;
+
+    /// Check if an ID is currently being fetched by another caller
+    ///
+    /// Returns false if the pending mark is stale (>60s old).
+    async fn is_being_fetched(&self, id: &LensId) -> Result<bool, LensError>;
+
+    /// Clear all pending fetch marks (for cleanup on startup/crashes)
+    async fn clear_pending_fetches(&self) -> Result<(), LensError>;
+
     /// Clear all cached data (both references and citations)
     async fn clear(&self) -> Result<(), LensError>;
 }

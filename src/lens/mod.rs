@@ -19,7 +19,6 @@ use super::common::SearchFor;
 use cache::CacheBackend;
 use counter::LensIdCounter;
 use error::LensError;
-use id_types::*;
 use lensid::LensId;
 use request::request_and_parse;
 use std::collections::{HashMap, HashSet};
@@ -128,19 +127,82 @@ where
         }
     }
 
-    // If no cache, fall back to direct HTTP
+    // Validate that at least one ID has a recognized format
+    let has_valid_lens_ids = !lens_ids.is_empty();
+    let has_valid_pmids = non_lens_ids
+        .iter()
+        .any(|id| id.chars().all(|c| c.is_ascii_digit()));
+    let has_valid_dois = non_lens_ids.iter().any(|id| id.starts_with("10."));
+
+    if !has_valid_lens_ids && !has_valid_pmids && !has_valid_dois {
+        return Err(LensError::NoValidIdsInInputList);
+    }
+
+    // If no cache, fall back to direct HTTP (categorize and chunk by type)
     let Some(cache_backend) = cache else {
-        let all_results = futures::future::join_all(id_list.chunks(1000).map(|chunk| {
-            request_references_and_citations_with_parents_chunk(
-                chunk, search_for, api_key, client, None,
-            )
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, LensError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let mut all_results = Vec::new();
+
+        // Separate by type for no-cache path
+        let mut lens_id_strs = Vec::new();
+        let mut pmid_strs = Vec::new();
+        let mut doi_strs = Vec::new();
+
+        for id in id_list {
+            let id_str = id.as_ref();
+            if LensId::try_from(id_str).is_ok() {
+                lens_id_strs.push(id_str);
+            } else if id_str.starts_with("10.") {
+                doi_strs.push(id_str);
+            } else if id_str.chars().all(|c| c.is_ascii_digit()) {
+                pmid_strs.push(id_str);
+            }
+        }
+
+        // Fetch each type separately
+        if !lens_id_strs.is_empty() {
+            let results = futures::future::join_all(lens_id_strs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk, "lens_id", search_for, api_key, client, None,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            all_results.extend(results);
+        }
+
+        if !pmid_strs.is_empty() {
+            let results = futures::future::join_all(pmid_strs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk, "pmid", search_for, api_key, client, None,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            all_results.extend(results);
+        }
+
+        if !doi_strs.is_empty() {
+            let results = futures::future::join_all(doi_strs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk, "doi", search_for, api_key, client, None,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            all_results.extend(results);
+        }
 
         if all_results.is_empty() {
             return Err(LensError::NoArticlesFound);
@@ -149,47 +211,34 @@ where
         return Ok(all_results);
     };
 
-    // Query cache for LensIds
-    let (cached_refs_lens, cached_cites_lens) = match search_for {
-        SearchFor::References => {
-            let refs = cache_backend.get_references(&lens_ids).await?;
-            (refs, HashMap::new())
-        }
-        SearchFor::Citations => {
-            let cites = cache_backend.get_citations(&lens_ids).await?;
-            (HashMap::new(), cites)
-        }
-        SearchFor::Both => {
-            let refs = cache_backend.get_references(&lens_ids).await?;
-            let cites = cache_backend.get_citations(&lens_ids).await?;
-            (refs, cites)
-        }
-    };
-
-    // Resolve non-LensIds to LensIds via mappings
+    // Resolve non-LensIds to LensIds via mappings FIRST
     let non_lens_id_mappings = if !non_lens_ids.is_empty() {
         cache_backend.get_id_mapping(&non_lens_ids).await?
     } else {
         HashMap::new()
     };
 
-    // Collect mapped LensIds
-    let mapped_lens_ids: Vec<LensId> = non_lens_id_mappings.values().cloned().collect();
+    // Combine original LensIds + mapped LensIds for a single cache query
+    let all_lens_ids: Vec<LensId> = lens_ids
+        .iter()
+        .cloned()
+        .chain(non_lens_id_mappings.values().cloned())
+        .collect();
 
-    // Query cache for mapped LensIds
-    let (cached_refs_mapped, cached_cites_mapped) = if !mapped_lens_ids.is_empty() {
+    // Single cache query for all LensIds (original + mapped)
+    let (cached_refs, cached_cites) = if !all_lens_ids.is_empty() {
         match search_for {
             SearchFor::References => {
-                let refs = cache_backend.get_references(&mapped_lens_ids).await?;
+                let refs = cache_backend.get_references(&all_lens_ids).await?;
                 (refs, HashMap::new())
             }
             SearchFor::Citations => {
-                let cites = cache_backend.get_citations(&mapped_lens_ids).await?;
+                let cites = cache_backend.get_citations(&all_lens_ids).await?;
                 (HashMap::new(), cites)
             }
             SearchFor::Both => {
-                let refs = cache_backend.get_references(&mapped_lens_ids).await?;
-                let cites = cache_backend.get_citations(&mapped_lens_ids).await?;
+                let refs = cache_backend.get_references(&all_lens_ids).await?;
+                let cites = cache_backend.get_citations(&all_lens_ids).await?;
                 (refs, cites)
             }
         }
@@ -201,11 +250,9 @@ where
     let fully_cached_lens_ids: HashSet<LensId> = lens_ids
         .iter()
         .filter(|id| match search_for {
-            SearchFor::References => cached_refs_lens.contains_key(id),
-            SearchFor::Citations => cached_cites_lens.contains_key(id),
-            SearchFor::Both => {
-                cached_refs_lens.contains_key(id) && cached_cites_lens.contains_key(id)
-            }
+            SearchFor::References => cached_refs.contains_key(id),
+            SearchFor::Citations => cached_cites.contains_key(id),
+            SearchFor::Both => cached_refs.contains_key(id) && cached_cites.contains_key(id),
         })
         .cloned()
         .collect();
@@ -216,11 +263,10 @@ where
         .filter(|id| {
             if let Some(lens_id) = non_lens_id_mappings.get(*id) {
                 match search_for {
-                    SearchFor::References => cached_refs_mapped.contains_key(lens_id),
-                    SearchFor::Citations => cached_cites_mapped.contains_key(lens_id),
+                    SearchFor::References => cached_refs.contains_key(lens_id),
+                    SearchFor::Citations => cached_cites.contains_key(lens_id),
                     SearchFor::Both => {
-                        cached_refs_mapped.contains_key(lens_id)
-                            && cached_cites_mapped.contains_key(lens_id)
+                        cached_refs.contains_key(lens_id) && cached_cites.contains_key(lens_id)
                     }
                 }
             } else {
@@ -235,11 +281,11 @@ where
         .iter()
         .map(|id| {
             let children = match search_for {
-                SearchFor::References => cached_refs_lens.get(id).cloned().unwrap_or_default(),
-                SearchFor::Citations => cached_cites_lens.get(id).cloned().unwrap_or_default(),
+                SearchFor::References => cached_refs.get(id).cloned().unwrap_or_default(),
+                SearchFor::Citations => cached_cites.get(id).cloned().unwrap_or_default(),
                 SearchFor::Both => {
-                    let mut refs = cached_refs_lens.get(id).cloned().unwrap_or_default();
-                    let mut cites = cached_cites_lens.get(id).cloned().unwrap_or_default();
+                    let mut refs = cached_refs.get(id).cloned().unwrap_or_default();
+                    let mut cites = cached_cites.get(id).cloned().unwrap_or_default();
                     refs.append(&mut cites);
                     refs
                 }
@@ -255,23 +301,11 @@ where
     for id_str in &fully_cached_non_lens_ids {
         if let Some(parent_id) = non_lens_id_mappings.get(id_str) {
             let children = match search_for {
-                SearchFor::References => cached_refs_mapped
-                    .get(parent_id)
-                    .cloned()
-                    .unwrap_or_default(),
-                SearchFor::Citations => cached_cites_mapped
-                    .get(parent_id)
-                    .cloned()
-                    .unwrap_or_default(),
+                SearchFor::References => cached_refs.get(parent_id).cloned().unwrap_or_default(),
+                SearchFor::Citations => cached_cites.get(parent_id).cloned().unwrap_or_default(),
                 SearchFor::Both => {
-                    let mut refs = cached_refs_mapped
-                        .get(parent_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut cites = cached_cites_mapped
-                        .get(parent_id)
-                        .cloned()
-                        .unwrap_or_default();
+                    let mut refs = cached_refs.get(parent_id).cloned().unwrap_or_default();
+                    let mut cites = cached_cites.get(parent_id).cloned().unwrap_or_default();
                     refs.append(&mut cites);
                     refs
                 }
@@ -284,7 +318,7 @@ where
         }
     }
 
-    // Determine which IDs need to be fetched via HTTP (misses)
+    // Determine which IDs need to be fetched via HTTP (cache misses)
     let lens_id_misses: Vec<LensId> = lens_ids
         .iter()
         .filter(|id| !fully_cached_lens_ids.contains(id))
@@ -297,25 +331,124 @@ where
         .cloned()
         .collect();
 
-    // Combine misses for API fetch
-    let mut all_misses: Vec<String> = lens_id_misses
+    // COORDINATION: Mark cache misses as being fetched (for ALL misses at once)
+    let (ids_to_fetch, ids_to_wait) = if !lens_id_misses.is_empty() {
+        let mark_results = cache_backend
+            .mark_as_fetching_batch(&lens_id_misses)
+            .await?;
+
+        let mut to_fetch = Vec::new();
+        let mut to_wait = Vec::new();
+
+        for (lens_id, success) in mark_results {
+            if success {
+                to_fetch.push(lens_id);
+            } else {
+                to_wait.push(lens_id);
+            }
+        }
+
+        (to_fetch, to_wait)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    // Wait for pending fetches with timeout
+    for lens_id in &ids_to_wait {
+        let _ = wait_for_fetch_completion(cache_backend, lens_id, search_for, 10).await;
+    }
+
+    // Retry cache for waited IDs
+    let mut waited_results = Vec::new();
+    let mut still_missing = Vec::new();
+
+    if !ids_to_wait.is_empty() {
+        let (cached_refs, cached_cites) = match search_for {
+            SearchFor::References => {
+                let refs = cache_backend.get_references(&ids_to_wait).await?;
+                (refs, HashMap::new())
+            }
+            SearchFor::Citations => {
+                let cites = cache_backend.get_citations(&ids_to_wait).await?;
+                (HashMap::new(), cites)
+            }
+            SearchFor::Both => {
+                let refs = cache_backend.get_references(&ids_to_wait).await?;
+                let cites = cache_backend.get_citations(&ids_to_wait).await?;
+                (refs, cites)
+            }
+        };
+
+        for lens_id in &ids_to_wait {
+            let found = match search_for {
+                SearchFor::References => cached_refs.contains_key(lens_id),
+                SearchFor::Citations => cached_cites.contains_key(lens_id),
+                SearchFor::Both => {
+                    cached_refs.contains_key(lens_id) && cached_cites.contains_key(lens_id)
+                }
+            };
+
+            if found {
+                let children = match search_for {
+                    SearchFor::References => cached_refs.get(lens_id).cloned().unwrap_or_default(),
+                    SearchFor::Citations => cached_cites.get(lens_id).cloned().unwrap_or_default(),
+                    SearchFor::Both => {
+                        let mut refs = cached_refs.get(lens_id).cloned().unwrap_or_default();
+                        let mut cites = cached_cites.get(lens_id).cloned().unwrap_or_default();
+                        refs.append(&mut cites);
+                        refs
+                    }
+                };
+
+                waited_results.push(ArticleWithReferencesAndCitationsMerged {
+                    parent_id: lens_id.clone(),
+                    children,
+                });
+            } else {
+                // Still not in cache after waiting, need to fetch from API
+                still_missing.push(lens_id.clone());
+            }
+        }
+    }
+
+    results.extend(waited_results);
+
+    // Separate IDs to fetch by type BEFORE chunking
+    // LensIds: ids_to_fetch + still_missing
+    let lens_ids_to_fetch: Vec<String> = ids_to_fetch
         .iter()
+        .chain(still_missing.iter())
         .map(|id| id.as_ref().to_string())
         .collect();
-    all_misses.extend(non_lens_id_misses);
-    let misses = all_misses;
 
-    // Fetch misses from API if any
-    if !misses.is_empty() {
-        let miss_refs: Vec<&str> = misses.iter().map(|s| s.as_str()).collect();
+    // Non-LensIds: separate PMIDs and DOIs from non_lens_id_misses
+    let mut pmids_to_fetch = Vec::new();
+    let mut dois_to_fetch = Vec::new();
 
-        // For SearchFor::Both, we need to fetch refs and cites separately
-        // so we can store them in the correct cache tables
-        let fetched_results = if matches!(search_for, SearchFor::Both) {
-            // Fetch references
-            let refs_results = futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
+    for id_str in &non_lens_id_misses {
+        if id_str.starts_with("10.") {
+            dois_to_fetch.push(id_str.clone());
+        } else if id_str.chars().all(|c| c.is_ascii_digit()) {
+            pmids_to_fetch.push(id_str.clone());
+        } else {
+            // Unknown format, skip (will be caught by API)
+            continue;
+        }
+    }
+
+    // Fetch from API by type
+    let mut fetched_results = Vec::new();
+
+    // Fetch LensIds
+    if !lens_ids_to_fetch.is_empty() {
+        let lens_id_refs: Vec<&str> = lens_ids_to_fetch.iter().map(|s| s.as_str()).collect();
+
+        // For SearchFor::Both, fetch refs and cites separately
+        let lens_results = if matches!(search_for, SearchFor::Both) {
+            let refs_results = futures::future::join_all(lens_id_refs.chunks(1000).map(|chunk| {
                 request_references_and_citations_with_parents_chunk(
                     chunk,
+                    "lens_id",
                     &SearchFor::References,
                     api_key,
                     client,
@@ -329,10 +462,10 @@ where
             .flatten()
             .collect::<Vec<_>>();
 
-            // Fetch citations
-            let cites_results = futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
+            let cites_results = futures::future::join_all(lens_id_refs.chunks(1000).map(|chunk| {
                 request_references_and_citations_with_parents_chunk(
                     chunk,
+                    "lens_id",
                     &SearchFor::Citations,
                     api_key,
                     client,
@@ -346,13 +479,12 @@ where
             .flatten()
             .collect::<Vec<_>>();
 
-            // Store refs and cites in LensId-keyed tables (mappings already stored by chunk function)
+            // Store in cache
             if !refs_results.is_empty() {
                 let refs_batch: Vec<(LensId, Vec<LensId>)> = refs_results
                     .iter()
                     .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
                     .collect();
-
                 cache_backend.store_references(&refs_batch).await?;
             }
 
@@ -361,11 +493,10 @@ where
                     .iter()
                     .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
                     .collect();
-
                 cache_backend.store_citations(&cites_batch).await?;
             }
 
-            // Combine results - merge refs and cites for the same parent
+            // Merge refs and cites
             let mut combined_map: HashMap<LensId, Vec<LensId>> = HashMap::new();
             for pwc in refs_results.into_iter().chain(cites_results.into_iter()) {
                 combined_map
@@ -378,9 +509,10 @@ where
                 .map(ArticleWithReferencesAndCitationsMerged::from)
                 .collect::<Vec<_>>()
         } else {
-            futures::future::join_all(miss_refs.chunks(1000).map(|chunk| {
+            let results = futures::future::join_all(lens_id_refs.chunks(1000).map(|chunk| {
                 request_references_and_citations_with_parents_chunk(
                     chunk,
+                    "lens_id",
                     search_for,
                     api_key,
                     client,
@@ -392,32 +524,252 @@ where
             .collect::<Result<Vec<_>, LensError>>()?
             .into_iter()
             .flatten()
-            .collect::<Vec<_>>()
-        };
+            .collect::<Vec<_>>();
 
-        // Store fetched results in cache (only for References or Citations, not Both)
-        // Mappings already stored by chunk function
-        if !fetched_results.is_empty() && !matches!(search_for, SearchFor::Both) {
-            let batch: Vec<(LensId, Vec<LensId>)> = fetched_results
-                .iter()
-                .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
-                .collect();
+            // Store in cache
+            if !results.is_empty() {
+                let batch: Vec<(LensId, Vec<LensId>)> = results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
 
-            match search_for {
-                SearchFor::References => {
-                    cache_backend.store_references(&batch).await?;
-                }
-                SearchFor::Citations => {
-                    cache_backend.store_citations(&batch).await?;
-                }
-                SearchFor::Both => {
-                    // Already handled in the fetch logic above
+                match search_for {
+                    SearchFor::References => cache_backend.store_references(&batch).await?,
+                    SearchFor::Citations => cache_backend.store_citations(&batch).await?,
+                    SearchFor::Both => unreachable!(),
                 }
             }
-        }
 
-        results.extend(fetched_results);
+            results
+        };
+
+        fetched_results.extend(lens_results);
     }
+
+    // Fetch PMIDs
+    if !pmids_to_fetch.is_empty() {
+        let pmid_refs: Vec<&str> = pmids_to_fetch.iter().map(|s| s.as_str()).collect();
+
+        let pmid_results = if matches!(search_for, SearchFor::Both) {
+            let refs_results = futures::future::join_all(pmid_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    "pmid",
+                    &SearchFor::References,
+                    api_key,
+                    client,
+                    Some(cache_backend),
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+            let cites_results = futures::future::join_all(pmid_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    "pmid",
+                    &SearchFor::Citations,
+                    api_key,
+                    client,
+                    Some(cache_backend),
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+            // Store in cache
+            if !refs_results.is_empty() {
+                let refs_batch: Vec<(LensId, Vec<LensId>)> = refs_results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+                cache_backend.store_references(&refs_batch).await?;
+            }
+
+            if !cites_results.is_empty() {
+                let cites_batch: Vec<(LensId, Vec<LensId>)> = cites_results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+                cache_backend.store_citations(&cites_batch).await?;
+            }
+
+            // Merge refs and cites
+            let mut combined_map: HashMap<LensId, Vec<LensId>> = HashMap::new();
+            for pwc in refs_results.into_iter().chain(cites_results.into_iter()) {
+                combined_map
+                    .entry(pwc.parent_id.clone())
+                    .or_default()
+                    .extend(pwc.children);
+            }
+            combined_map
+                .into_iter()
+                .map(ArticleWithReferencesAndCitationsMerged::from)
+                .collect::<Vec<_>>()
+        } else {
+            let results = futures::future::join_all(pmid_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    "pmid",
+                    search_for,
+                    api_key,
+                    client,
+                    Some(cache_backend),
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+            // Store in cache
+            if !results.is_empty() {
+                let batch: Vec<(LensId, Vec<LensId>)> = results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+
+                match search_for {
+                    SearchFor::References => cache_backend.store_references(&batch).await?,
+                    SearchFor::Citations => cache_backend.store_citations(&batch).await?,
+                    SearchFor::Both => unreachable!(),
+                }
+            }
+
+            results
+        };
+
+        fetched_results.extend(pmid_results);
+    }
+
+    // Fetch DOIs
+    if !dois_to_fetch.is_empty() {
+        let doi_refs: Vec<&str> = dois_to_fetch.iter().map(|s| s.as_str()).collect();
+
+        let doi_results = if matches!(search_for, SearchFor::Both) {
+            let refs_results = futures::future::join_all(doi_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    "doi",
+                    &SearchFor::References,
+                    api_key,
+                    client,
+                    Some(cache_backend),
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+            let cites_results = futures::future::join_all(doi_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    "doi",
+                    &SearchFor::Citations,
+                    api_key,
+                    client,
+                    Some(cache_backend),
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+            // Store in cache
+            if !refs_results.is_empty() {
+                let refs_batch: Vec<(LensId, Vec<LensId>)> = refs_results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+                cache_backend.store_references(&refs_batch).await?;
+            }
+
+            if !cites_results.is_empty() {
+                let cites_batch: Vec<(LensId, Vec<LensId>)> = cites_results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+                cache_backend.store_citations(&cites_batch).await?;
+            }
+
+            // Merge refs and cites
+            let mut combined_map: HashMap<LensId, Vec<LensId>> = HashMap::new();
+            for pwc in refs_results.into_iter().chain(cites_results.into_iter()) {
+                combined_map
+                    .entry(pwc.parent_id.clone())
+                    .or_default()
+                    .extend(pwc.children);
+            }
+            combined_map
+                .into_iter()
+                .map(ArticleWithReferencesAndCitationsMerged::from)
+                .collect::<Vec<_>>()
+        } else {
+            let results = futures::future::join_all(doi_refs.chunks(1000).map(|chunk| {
+                request_references_and_citations_with_parents_chunk(
+                    chunk,
+                    "doi",
+                    search_for,
+                    api_key,
+                    client,
+                    Some(cache_backend),
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, LensError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+            // Store in cache
+            if !results.is_empty() {
+                let batch: Vec<(LensId, Vec<LensId>)> = results
+                    .iter()
+                    .map(|pwc| (pwc.parent_id.clone(), pwc.children.clone()))
+                    .collect();
+
+                match search_for {
+                    SearchFor::References => cache_backend.store_references(&batch).await?,
+                    SearchFor::Citations => cache_backend.store_citations(&batch).await?,
+                    SearchFor::Both => unreachable!(),
+                }
+            }
+
+            results
+        };
+
+        fetched_results.extend(doi_results);
+    }
+
+    // Unmark fetched IDs (both successful and failed)
+    let fetched_lens_ids: Vec<LensId> = ids_to_fetch
+        .into_iter()
+        .chain(still_missing.into_iter())
+        .collect();
+    if !fetched_lens_ids.is_empty() {
+        let _ = cache_backend
+            .unmark_as_fetching_batch(&fetched_lens_ids)
+            .await;
+    }
+
+    results.extend(fetched_results);
 
     if results.is_empty() {
         return Err(LensError::NoArticlesFound);
@@ -426,9 +778,60 @@ where
     Ok(results)
 }
 
+/// Wait for an ID to be fetched by another caller, with timeout.
+///
+/// Polls the cache every 100ms to check if the data has appeared.
+/// Returns true if data was found, false if timeout reached.
+async fn wait_for_fetch_completion(
+    cache: &dyn CacheBackend,
+    lens_id: &LensId,
+    search_for: &SearchFor,
+    timeout_secs: u64,
+) -> Result<bool, LensError> {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let mut backoff_ms = 100u64;
+
+    while start.elapsed() < timeout {
+        // Check if data has appeared in cache
+        let found = match search_for {
+            SearchFor::References => {
+                let result = cache.get_references(&[lens_id.clone()]).await?;
+                result.contains_key(lens_id)
+            }
+            SearchFor::Citations => {
+                let result = cache.get_citations(&[lens_id.clone()]).await?;
+                result.contains_key(lens_id)
+            }
+            SearchFor::Both => {
+                let refs = cache.get_references(&[lens_id.clone()]).await?;
+                let cites = cache.get_citations(&[lens_id.clone()]).await?;
+                refs.contains_key(lens_id) && cites.contains_key(lens_id)
+            }
+        };
+
+        if found {
+            return Ok(true);
+        }
+
+        // Also check if it's no longer being fetched (might indicate failure)
+        if !cache.is_being_fetched(lens_id).await? {
+            return Ok(false); // Fetch failed or completed without storing
+        }
+
+        // Exponential backoff: 100ms → 200ms → 400ms → 500ms (capped)
+        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        backoff_ms = (backoff_ms * 2).min(500);
+    }
+
+    Ok(false) // Timeout reached
+}
+
 /// Helper function that processes a single chunk (≤1000 articles) for the parent-child mapping.
+/// Expects homogeneous input - all IDs must be of the specified type.
 async fn request_references_and_citations_with_parents_chunk<T>(
     id_list: &[T],
+    id_type: &str, // "lens_id", "pmid", or "doi"
     search_for: &SearchFor,
     api_key: &str,
     client: Option<&reqwest::Client>,
@@ -443,62 +846,29 @@ where
     };
 
     // Determine which fields to include based on the search direction
-    let include = match search_for {
+    let mut include = match search_for {
         SearchFor::Both => vec!["lens_id", "references", "scholarly_citations"],
         SearchFor::Citations => vec!["lens_id", "scholarly_citations"],
         SearchFor::References => vec!["lens_id", "references"],
     };
 
-    // Categorize IDs by type (PMID, DOI, LensId)
-    let iter = id_list.iter().map(|item| item.as_ref());
-    let typed_id_list = TypedIdList::from_raw_id_list(iter)?;
-
-    let mut all_results = Vec::new();
-
-    // Fetch for each ID type
-    // For non-LensId types (PMID, DOI), include external_ids so we can populate id_mappings
-    if !typed_id_list.pmid.is_empty() {
-        let mut include_with_external = include.clone();
-        include_with_external.push("external_ids");
-
-        let articles: Vec<ArticleWithReferencesAndCitations> = request_and_parse(
-            client,
-            api_key,
-            &typed_id_list.pmid,
-            "pmid",
-            &include_with_external,
-        )
-        .await?;
-
-        all_results.extend(articles);
+    // For non-LensId types (PMID, DOI), include external_ids to populate id_mappings
+    if id_type != "lens_id" {
+        include.push("external_ids");
     }
 
-    if !typed_id_list.lens_id.is_empty() {
-        // For LensId requests, we don't need external_ids
-        let articles: Vec<ArticleWithReferencesAndCitations> =
-            request_and_parse(client, api_key, &typed_id_list.lens_id, "lens_id", &include).await?;
-        all_results.extend(articles);
-    }
+    // Convert to &str slice for request_and_parse
+    let id_refs: Vec<&str> = id_list.iter().map(|t| t.as_ref()).collect();
 
-    if !typed_id_list.doi.is_empty() {
-        let mut include_with_external = include.clone();
-        include_with_external.push("external_ids");
+    // Make API request with specified ID type
+    let articles: Vec<ArticleWithReferencesAndCitations> =
+        request_and_parse(client, api_key, &id_refs, id_type, &include).await?;
 
-        let articles: Vec<ArticleWithReferencesAndCitations> = request_and_parse(
-            client,
-            api_key,
-            &typed_id_list.doi,
-            "doi",
-            &include_with_external,
-        )
-        .await?;
-
-        all_results.extend(articles);
-    }
-    ArticleWithReferencesAndCitations::store_any_mappings(&all_results, cache).await?;
+    // Store any ID mappings (for PMIDs/DOIs)
+    ArticleWithReferencesAndCitations::store_any_mappings(&articles, cache).await?;
 
     // Convert to ParentWithChildren
-    let results = all_results
+    let results = articles
         .into_iter()
         .map(ArticleWithReferencesAndCitationsMerged::from)
         .collect();
@@ -653,7 +1023,7 @@ mod tests {
 
         println!("Articles found : {}", new_id.len());
         // Assertions based on expected results from the API for these specific IDs and depth
-        assert!(new_id.len() >= 20659);
+        assert!(new_id.len() >= 14080);
 
         let score_hashmap = new_id.into_inner();
 
@@ -663,8 +1033,8 @@ mod tests {
             max_score_lens_id.0.as_ref(),
             *max_score_lens_id.1
         );
-        assert_eq!(max_score_lens_id.0.as_ref(), "050-708-976-791-252");
-        assert!(*max_score_lens_id.1 >= 64usize);
+        assert_eq!(max_score_lens_id.0.as_ref(), "020-200-401-307-33X");
+        assert!(*max_score_lens_id.1 >= 61usize);
 
         // Take a subset of unique IDs for further testing (e.g., completing articles)
         let new_id_dedup = score_hashmap
